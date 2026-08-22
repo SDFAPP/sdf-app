@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, UserPlus, ClipboardList, ArrowUpRight, Clock, XCircle,
-  Play, Search, X, Plus, Trash2, LogOut,
+  Play, Search, X, Plus, Trash2, LogOut, ArrowLeft, Users, ShieldCheck,
 } from "lucide-react";
 
 // --- Supabase config ---------------------------------------------------
@@ -874,29 +874,569 @@ function TrainingLog({ session, onLogout }) {
 }
 
 // ============================================================
-// Coach dashboard — placeholder until we build this out
+// Coach dashboard — client roster, progress review, assigning
+// workouts, and an admin view of subscribers.
 // ============================================================
-function CoachDashboard({ onLogout }) {
+const COACH_TABS = [
+  { key: "clients", label: "Clients", icon: Users },
+  { key: "admin", label: "Admin", icon: ShieldCheck },
+];
+
+function CoachDashboard({ session, onLogout }) {
+  const [tab, setTab] = useState("clients");
+  const [clients, setClients] = useState([]);
+  const [clientsLoading, setClientsLoading] = useState(true);
+  const [clientsError, setClientsError] = useState("");
+  const [selectedClient, setSelectedClient] = useState(null);
+
+  useEffect(() => {
+    loadClients();
+  }, []);
+
+  async function loadClients() {
+    setClientsLoading(true);
+    setClientsError("");
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/profiles?role=eq.client&select=id,full_name,email,status&order=full_name.asc`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) throw new Error("Could not load your client list.");
+      setClients(await res.json());
+    } catch (err) {
+      setClientsError(err.message || "Could not load your client list.");
+    } finally {
+      setClientsLoading(false);
+    }
+  }
+
+  if (selectedClient) {
+    return (
+      <ClientWorkspace
+        client={selectedClient}
+        session={session}
+        onBack={() => setSelectedClient(null)}
+        onLogout={onLogout}
+      />
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-[#F5F4F1] flex items-center justify-center px-6">
-      <div className="text-center max-w-sm">
-        <p className="text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-3">
-          Coach workspace
-        </p>
-        <h2 className="text-3xl font-black text-neutral-900">Coach dashboard</h2>
-        <p className="mt-2 text-sm text-neutral-500">
-          This is next up — client rosters, assigning workouts, and progress
-          review. Tell Claude what you want here and it'll get built the same
-          way as the training log.
-        </p>
-        <button
-          type="button"
-          onClick={onLogout}
-          className="mt-6 flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 mx-auto"
-        >
-          <LogOut size={14} /> Log out
-        </button>
+    <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
+      <div className="max-w-3xl mx-auto">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+              Coach workspace
+            </p>
+            <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-neutral-900">
+              Coach dashboard
+            </h1>
+          </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 shrink-0 mt-2"
+          >
+            <LogOut size={14} /> Log out
+          </button>
+        </div>
+
+        <div role="tablist" className="mt-8 flex items-center gap-6 border-b border-neutral-200">
+          {COACH_TABS.map(({ key, label, icon: Icon }) => {
+            const active = tab === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setTab(key)}
+                className={`flex items-center gap-1.5 pb-3 text-sm whitespace-nowrap transition-colors border-b-2 -mb-px ${
+                  active
+                    ? "border-neutral-900 text-neutral-900 font-medium"
+                    : "border-transparent text-neutral-400 hover:text-neutral-600"
+                }`}
+              >
+                <Icon size={14} strokeWidth={2} />
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {tab === "clients" && (
+          <div className="mt-6">
+            {clientsLoading ? (
+              <p className="text-sm text-neutral-400">Loading…</p>
+            ) : clientsError ? (
+              <p className="text-sm text-red-600" role="alert">
+                {clientsError}
+              </p>
+            ) : clients.length === 0 ? (
+              <p className="text-sm text-neutral-500">No clients have registered yet.</p>
+            ) : (
+              <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
+                {clients.map((c) => (
+                  <li key={c.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedClient(c)}
+                      className="w-full flex items-center justify-between px-4 py-3.5 text-left hover:bg-neutral-50 transition-colors"
+                    >
+                      <span>
+                        <span className="block text-sm font-medium text-neutral-900">
+                          {c.full_name || c.email}
+                        </span>
+                        <span className="block text-xs text-neutral-400">{c.email}</span>
+                      </span>
+                      <ArrowUpRight size={16} className="text-neutral-300 shrink-0" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {tab === "admin" && <SubscribersAdmin session={session} />}
       </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------
+// A single client's progress: workout history plus a builder for
+// assigning a new workout, scoped to that client's category tabs.
+// ------------------------------------------------------------
+function ClientWorkspace({ client, session, onBack, onLogout }) {
+  const [activeCategory, setActiveCategory] = useState(CATEGORIES[0]);
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [workoutEntries, setWorkoutEntries] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  const [search, setSearch] = useState("");
+
+  const activeCategoryRef = useRef(activeCategory);
+  useEffect(() => {
+    activeCategoryRef.current = activeCategory;
+  }, [activeCategory]);
+
+  useEffect(() => {
+    loadHistory(activeCategory);
+    setBuilderOpen(false);
+    setWorkoutEntries([]);
+    setSaveError("");
+  }, [activeCategory]);
+
+  async function loadHistory(category) {
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&category=eq.${encodeURIComponent(
+          category
+        )}&select=id,title,created_at,assigned_by&order=created_at.desc&limit=10`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (category !== activeCategoryRef.current) return;
+      if (!res.ok) throw new Error("Could not load this client's workout history.");
+      setHistory(await res.json());
+    } catch (err) {
+      if (category !== activeCategoryRef.current) return;
+      setHistory([]);
+      setHistoryError(err.message || "Could not load this client's workout history.");
+    } finally {
+      if (category === activeCategoryRef.current) setHistoryLoading(false);
+    }
+  }
+
+  function addExerciseToWorkout(name) {
+    setWorkoutEntries((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), exercise: name, sets: "3", reps: "10", weight: "" },
+    ]);
+    setBuilderOpen(true);
+  }
+
+  function updateEntry(id, field, value) {
+    setWorkoutEntries((prev) => prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)));
+  }
+
+  function removeEntry(id) {
+    setWorkoutEntries((prev) => prev.filter((e) => e.id !== id));
+  }
+
+  async function assignWorkout() {
+    if (workoutEntries.length === 0) {
+      setSaveError("Add at least one exercise before assigning.");
+      return;
+    }
+    for (const entry of workoutEntries) {
+      const sets = Number(entry.sets);
+      const reps = Number(entry.reps);
+      if (!Number.isInteger(sets) || sets <= 0) {
+        setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
+        return;
+      }
+      if (!Number.isInteger(reps) || reps <= 0) {
+        setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
+        return;
+      }
+      if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
+        setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
+        return;
+      }
+    }
+    setSaving(true);
+    setSaveError("");
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/workouts`, {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify({
+          client_id: client.id,
+          assigned_by: session.user.id,
+          category: activeCategory,
+          title: `${activeCategory} — ${workoutEntries.length} exercise${workoutEntries.length === 1 ? "" : "s"} (assigned)`,
+          entries: workoutEntries.map(({ id, ...rest }) => rest),
+        }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new Error("Your session may have expired. Try logging out and back in.");
+      }
+      if (!res.ok) throw new Error("Could not assign this workout.");
+      setWorkoutEntries([]);
+      setBuilderOpen(false);
+      loadHistory(activeCategory);
+    } catch (err) {
+      setSaveError(err.message || "Something went wrong assigning this workout.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const filteredLibrary = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return EXERCISE_LIBRARY;
+    return EXERCISE_LIBRARY.filter((ex) => ex.toLowerCase().includes(q));
+  }, [search]);
+
+  return (
+    <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
+      <div className="max-w-3xl mx-auto">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <button
+              type="button"
+              onClick={onBack}
+              className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 mb-3"
+            >
+              <ArrowLeft size={14} /> Back to clients
+            </button>
+            <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+              Client progress
+            </p>
+            <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-neutral-900">
+              {client.full_name || client.email}
+            </h1>
+          </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 shrink-0 mt-2"
+          >
+            <LogOut size={14} /> Log out
+          </button>
+        </div>
+
+        <div className="mt-8 border-b border-neutral-300" />
+
+        <div role="tablist" className="mt-6 flex flex-wrap gap-3">
+          {CATEGORIES.map((cat) => {
+            const active = cat === activeCategory;
+            return (
+              <button
+                key={cat}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setActiveCategory(cat)}
+                className={`px-5 py-4 text-sm font-medium border transition-colors text-left min-w-[140px] flex-1 sm:flex-none ${
+                  active
+                    ? "bg-neutral-900 text-white border-neutral-900"
+                    : "bg-white text-neutral-700 border-neutral-200 hover:border-neutral-400"
+                }`}
+              >
+                {cat}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-8 border border-neutral-200 bg-white p-5 sm:p-6">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-lg font-bold text-neutral-900">{activeCategory}</h2>
+            {!builderOpen && (
+              <button
+                type="button"
+                onClick={() => setBuilderOpen(true)}
+                className="flex items-center gap-1.5 text-sm font-medium bg-neutral-900 text-white px-4 py-2.5 hover:bg-neutral-800 transition-colors"
+              >
+                <Plus size={14} /> Assign workout
+              </button>
+            )}
+          </div>
+
+          {builderOpen && (
+            <div className="mt-4">
+              {workoutEntries.length === 0 ? (
+                <p className="text-sm text-neutral-500">
+                  Search the exercise library below and click an exercise to add it here.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {workoutEntries.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="flex flex-wrap items-center gap-2 sm:gap-3 border-b border-neutral-100 pb-3 last:border-0 last:pb-0"
+                    >
+                      <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
+                        {entry.exercise}
+                      </span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        value={entry.sets}
+                        onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
+                        placeholder="Sets"
+                        aria-label={`Sets for ${entry.exercise}`}
+                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      />
+                      <span className="text-xs text-neutral-400">sets</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        value={entry.reps}
+                        onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
+                        placeholder="Reps"
+                        aria-label={`Reps for ${entry.exercise}`}
+                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      />
+                      <span className="text-xs text-neutral-400">reps</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={entry.weight}
+                        onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
+                        placeholder="Weight (kg)"
+                        aria-label={`Weight in kilograms for ${entry.exercise}`}
+                        className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeEntry(entry.id)}
+                        className="ml-auto text-neutral-400 hover:text-red-600 p-1"
+                        aria-label="Remove exercise"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="relative mt-4 mb-3">
+                <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search Exercise Library"
+                  aria-label="Search exercise library"
+                  className="w-full border border-neutral-300 pl-9 pr-9 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={() => setSearch("")}
+                    aria-label="Clear search"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700"
+                  >
+                    <X size={15} />
+                  </button>
+                )}
+              </div>
+
+              <div className="max-h-56 overflow-y-auto border border-neutral-200">
+                {filteredLibrary.length === 0 ? (
+                  <p className="px-4 py-3 text-sm text-neutral-400">No exercises match "{search}".</p>
+                ) : (
+                  filteredLibrary.map((ex) => (
+                    <button
+                      key={ex}
+                      type="button"
+                      onClick={() => addExerciseToWorkout(ex)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-left text-neutral-700 border-b border-neutral-100 last:border-0 hover:bg-neutral-50 transition-colors"
+                    >
+                      {ex}
+                      <Plus size={14} className="text-neutral-300" />
+                    </button>
+                  ))
+                )}
+              </div>
+
+              {saveError && (
+                <p className="mt-3 text-sm text-red-600" role="alert">
+                  {saveError}
+                </p>
+              )}
+
+              <div className="mt-4 flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={saving || workoutEntries.length === 0}
+                  onClick={assignWorkout}
+                  className="flex-1 sm:flex-none bg-neutral-900 text-white text-sm font-medium px-5 py-3 hover:bg-neutral-800 transition-colors disabled:opacity-50"
+                >
+                  {saving ? "Assigning…" : "Assign workout"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBuilderOpen(false);
+                    setWorkoutEntries([]);
+                    setSaveError("");
+                  }}
+                  className="text-sm text-neutral-500 hover:text-neutral-900"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6 border-t border-neutral-100 pt-5">
+            <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+              History
+            </p>
+            {historyLoading ? (
+              <p className="text-sm text-neutral-400">Loading…</p>
+            ) : historyError ? (
+              <p className="text-sm text-red-600" role="alert">
+                {historyError}
+              </p>
+            ) : history.length === 0 ? (
+              <p className="text-sm text-neutral-500">No workouts logged in this category yet.</p>
+            ) : (
+              <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
+                {history.map((w) => (
+                  <li key={w.id} className="flex items-center justify-between px-4 py-3">
+                    <span className="text-sm text-neutral-800">
+                      {w.title}
+                      {w.assigned_by && (
+                        <span className="ml-2 text-xs text-neutral-400 uppercase tracking-wide">
+                          Assigned
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-xs text-neutral-400">{timeAgo(w.created_at)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------
+// Admin: read-only view of current subscribers, pulled straight
+// from the subscribers table (populated by the Stripe integration).
+// ------------------------------------------------------------
+function SubscribersAdmin({ session }) {
+  const [subscribers, setSubscribers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      setError("");
+      try {
+        const res = await fetch(
+          `${SUPABASE_URL}/rest/v1/subscribers?select=email,subscribed,subscription_tier,subscription_end&order=email.asc`,
+          { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+        );
+        if (!res.ok) throw new Error("Could not load subscribers.");
+        setSubscribers(await res.json());
+      } catch (err) {
+        setError(err.message || "Could not load subscribers.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  return (
+    <div className="mt-6">
+      <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+        Current subscribers
+      </p>
+      {loading ? (
+        <p className="text-sm text-neutral-400">Loading…</p>
+      ) : error ? (
+        <p className="text-sm text-red-600" role="alert">
+          {error}
+        </p>
+      ) : subscribers.length === 0 ? (
+        <p className="text-sm text-neutral-500">No subscribers yet.</p>
+      ) : (
+        <div className="overflow-x-auto border border-neutral-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-neutral-200 text-left text-xs text-neutral-500 uppercase tracking-wide">
+                <th className="px-4 py-3 font-semibold">Email</th>
+                <th className="px-4 py-3 font-semibold">Status</th>
+                <th className="px-4 py-3 font-semibold">Plan</th>
+                <th className="px-4 py-3 font-semibold">Renews / ends</th>
+              </tr>
+            </thead>
+            <tbody>
+              {subscribers.map((s) => (
+                <tr key={s.email} className="border-b border-neutral-100 last:border-0">
+                  <td className="px-4 py-3 text-neutral-800">{s.email}</td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`text-xs font-medium uppercase tracking-wide ${
+                        s.subscribed ? "text-emerald-700" : "text-neutral-400"
+                      }`}
+                    >
+                      {s.subscribed ? "Active" : "Inactive"}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-neutral-600">{s.subscription_tier || "—"}</td>
+                  <td className="px-4 py-3 text-neutral-600">
+                    {s.subscription_end ? new Date(s.subscription_end).toLocaleDateString() : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
