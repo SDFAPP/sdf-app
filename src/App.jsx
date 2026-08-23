@@ -767,6 +767,59 @@ function displayToCm(value, units) {
   return Math.round(units === "imperial" ? n * CM_PER_IN : n);
 }
 
+// Quick reference for a coach entering weights for a client who tracks in a
+// different unit than the coach is used to thinking in — not tied to any
+// saved data, just a live two-way kg/lbs calculator.
+function WeightConverter() {
+  const [kg, setKg] = useState("");
+  const [lbs, setLbs] = useState("");
+
+  function handleKgChange(value) {
+    setKg(value);
+    const n = Number(value);
+    setLbs(value.trim() !== "" && Number.isFinite(n) ? String(Math.round((n / KG_PER_LB) * 10) / 10) : "");
+  }
+
+  function handleLbsChange(value) {
+    setLbs(value);
+    const n = Number(value);
+    setKg(value.trim() !== "" && Number.isFinite(n) ? String(Math.round(n * KG_PER_LB * 10) / 10) : "");
+  }
+
+  return (
+    <div className="border border-neutral-200 bg-neutral-50 p-4 mb-4">
+      <p className="text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-3">
+        Weight converter
+      </p>
+      <div className="flex items-end gap-3">
+        <div className="flex-1">
+          <label htmlFor="conv-kg" className="block text-xs text-neutral-500 mb-1">kg</label>
+          <input
+            id="conv-kg"
+            type="text"
+            inputMode="decimal"
+            value={kg}
+            onChange={(e) => handleKgChange(e.target.value)}
+            className="w-full border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+          />
+        </div>
+        <span className="text-neutral-400 pb-2">=</span>
+        <div className="flex-1">
+          <label htmlFor="conv-lbs" className="block text-xs text-neutral-500 mb-1">lbs</label>
+          <input
+            id="conv-lbs"
+            type="text"
+            inputMode="decimal"
+            value={lbs}
+            onChange={(e) => handleLbsChange(e.target.value)}
+            className="w-full border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProfileModal({ session, profile, onClose, onSaved }) {
   const [units, setUnits] = useState(profile.measurement_system === "imperial" ? "imperial" : "metric");
   const [weight, setWeight] = useState(kgToDisplay(profile.weight_kg, units));
@@ -1421,7 +1474,7 @@ function CoachDashboard({ session, onLogout }) {
     setClientsError("");
     try {
       const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/profiles?role=eq.client&select=id,full_name,email,status&order=full_name.asc`,
+        `${SUPABASE_URL}/rest/v1/profiles?role=eq.client&select=id,full_name,email,status,measurement_system&order=full_name.asc`,
         { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
       );
       if (!res.ok) throw new Error("Could not load your client list.");
@@ -1658,6 +1711,8 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
     });
   }, [search, activeCategory]);
 
+  const unitLabel = client.measurement_system === "imperial" ? "lbs" : "kg";
+
   return (
     <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
       <div className="max-w-3xl mx-auto">
@@ -1726,6 +1781,11 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
 
           {builderOpen && (
             <div className="mt-4">
+              <p className="text-xs text-neutral-400 mb-3">
+                {client.full_name || client.email} tracks weight in {unitLabel}.
+              </p>
+              <WeightConverter />
+
               {workoutEntries.length === 0 ? (
                 <p className="text-sm text-neutral-500">
                   Search the exercise library below and click an exercise to add it here.
@@ -1765,8 +1825,8 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                         inputMode="decimal"
                         value={entry.weight}
                         onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
-                        placeholder="Weight (kg)"
-                        aria-label={`Weight in kilograms for ${entry.exercise}`}
+                        placeholder={`Weight (${unitLabel})`}
+                        aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
                         className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
                       <button
