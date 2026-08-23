@@ -742,6 +742,233 @@ function ExerciseDetailModal({ name, onClose, onAdd }) {
   );
 }
 
+const KG_PER_LB = 0.45359237;
+const CM_PER_IN = 2.54;
+const ACTIVITY_LEVELS = ["Sedentary", "Lightly active", "Moderately active", "Very active", "Extremely active"];
+
+function kgToDisplay(kg, units) {
+  if (kg == null || kg === "") return "";
+  const n = units === "imperial" ? kg / KG_PER_LB : kg;
+  return String(Math.round(n * 10) / 10);
+}
+function displayToKg(value, units) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return units === "imperial" ? n * KG_PER_LB : n;
+}
+function cmToDisplay(cm, units) {
+  if (cm == null || cm === "") return "";
+  const n = units === "imperial" ? cm / CM_PER_IN : cm;
+  return String(Math.round(n * 10) / 10);
+}
+function displayToCm(value, units) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(units === "imperial" ? n * CM_PER_IN : n);
+}
+
+function ProfileModal({ session, profile, onClose, onSaved }) {
+  const [units, setUnits] = useState(profile.measurement_system === "imperial" ? "imperial" : "metric");
+  const [weight, setWeight] = useState(kgToDisplay(profile.weight_kg, units));
+  const [goalWeight, setGoalWeight] = useState(kgToDisplay(profile.goal_weight_kg, units));
+  const [height, setHeight] = useState(cmToDisplay(profile.height_cm, units));
+  const [dob, setDob] = useState(profile.date_of_birth || "");
+  const [activityLevel, setActivityLevel] = useState(profile.activity_level || "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  function handleUnitsChange(nextUnits) {
+    if (nextUnits === units) return;
+    const weightKg = displayToKg(weight, units);
+    const goalKg = displayToKg(goalWeight, units);
+    const heightCm = displayToCm(height, units);
+    setWeight(kgToDisplay(weightKg, nextUnits));
+    setGoalWeight(kgToDisplay(goalKg, nextUnits));
+    setHeight(cmToDisplay(heightCm, nextUnits));
+    setUnits(nextUnits);
+  }
+
+  async function handleSave(e) {
+    e.preventDefault();
+    setError("");
+
+    if (weight.trim() !== "" && !(Number(weight) > 0)) {
+      setError("Enter a valid body weight, or leave it blank.");
+      return;
+    }
+    if (goalWeight.trim() !== "" && !(Number(goalWeight) > 0)) {
+      setError("Enter a valid goal weight, or leave it blank.");
+      return;
+    }
+    if (height.trim() !== "" && !(Number(height) > 0)) {
+      setError("Enter a valid height, or leave it blank.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const body = {
+        measurement_system: units,
+        weight_kg: weight.trim() === "" ? null : displayToKg(weight, units),
+        goal_weight_kg: goalWeight.trim() === "" ? null : displayToKg(goalWeight, units),
+        height_cm: height.trim() === "" ? null : displayToCm(height, units),
+        date_of_birth: dob || null,
+        activity_level: activityLevel || null,
+      };
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/profiles?id=eq.${session.user.id}`, {
+        method: "PATCH",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("Could not save your profile.");
+      const rows = await res.json();
+      setSaved(true);
+      onSaved(rows[0] || { ...profile, ...body });
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err.message || "Something went wrong saving your profile.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={onClose}>
+      <div
+        className="bg-white w-full max-w-md max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Your profile"
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-200 sticky top-0 bg-white">
+          <h3 className="text-lg font-bold text-neutral-900">Your profile</h3>
+          <button type="button" onClick={onClose} aria-label="Close" className="text-neutral-400 hover:text-neutral-900">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSave} className="p-5 space-y-5">
+          <div>
+            <label className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+              Units
+            </label>
+            <div className="flex gap-2">
+              {["metric", "imperial"].map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => handleUnitsChange(opt)}
+                  className={`flex-1 py-2 text-sm font-medium border transition-colors ${
+                    units === opt
+                      ? "bg-neutral-900 text-white border-neutral-900"
+                      : "bg-white text-neutral-700 border-neutral-300 hover:border-neutral-400"
+                  }`}
+                >
+                  {opt === "metric" ? "Metric (kg / cm)" : "Imperial (lbs / in)"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="profile-weight" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+                Weight ({units === "imperial" ? "lbs" : "kg"})
+              </label>
+              <input
+                id="profile-weight"
+                type="text"
+                inputMode="decimal"
+                value={weight}
+                onChange={(e) => setWeight(e.target.value)}
+                className="w-full border border-neutral-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+              />
+            </div>
+            <div>
+              <label htmlFor="profile-goal-weight" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+                Goal weight ({units === "imperial" ? "lbs" : "kg"})
+              </label>
+              <input
+                id="profile-goal-weight"
+                type="text"
+                inputMode="decimal"
+                value={goalWeight}
+                onChange={(e) => setGoalWeight(e.target.value)}
+                className="w-full border border-neutral-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="profile-height" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+              Height ({units === "imperial" ? "in" : "cm"})
+            </label>
+            <input
+              id="profile-height"
+              type="text"
+              inputMode="decimal"
+              value={height}
+              onChange={(e) => setHeight(e.target.value)}
+              className="w-full border border-neutral-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="profile-dob" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+              Date of birth
+            </label>
+            <input
+              id="profile-dob"
+              type="date"
+              value={dob}
+              onChange={(e) => setDob(e.target.value)}
+              className="w-full border border-neutral-300 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+            />
+          </div>
+
+          <div>
+            <label htmlFor="profile-activity" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+              Activity level
+            </label>
+            <select
+              id="profile-activity"
+              value={activityLevel}
+              onChange={(e) => setActivityLevel(e.target.value)}
+              className="w-full border border-neutral-300 px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+            >
+              <option value="">Not set</option>
+              {ACTIVITY_LEVELS.map((level) => (
+                <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+          </div>
+
+          {error && (
+            <p className="text-sm text-red-600" role="alert">
+              {error}
+            </p>
+          )}
+
+          <button
+            type="submit"
+            disabled={saving}
+            className="w-full bg-neutral-900 text-white text-sm font-medium py-3 hover:bg-neutral-800 transition-colors disabled:opacity-60"
+          >
+            {saving ? "Saving…" : saved ? "Saved" : "Save changes"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function TrainingLog({ session, onLogout }) {
   const [activeCategory, setActiveCategory] = useState(CATEGORIES[0]);
   const [history, setHistory] = useState([]);
@@ -755,6 +982,26 @@ function TrainingLog({ session, onLogout }) {
 
   const [search, setSearch] = useState("");
   const [viewingExercise, setViewingExercise] = useState(null);
+
+  const [profile, setProfile] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(
+          `${SUPABASE_URL}/rest/v1/profiles?id=eq.${session.user.id}&select=weight_kg,height_cm,goal_weight_kg,date_of_birth,activity_level,measurement_system`,
+          { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+        );
+        if (!res.ok) return;
+        const rows = await res.json();
+        if (rows[0]) setProfile(rows[0]);
+      } catch {
+        // Weight-unit label just falls back to kg; the profile modal will
+        // still show its own error if this keeps failing.
+      }
+    })();
+  }, []);
 
   // Guards against a slow, stale request overwriting newer results if the
   // user switches categories again before the first fetch resolves.
@@ -875,6 +1122,8 @@ function TrainingLog({ session, onLogout }) {
     });
   }, [search, activeCategory]);
 
+  const unitLabel = profile?.measurement_system === "imperial" ? "lbs" : "kg";
+
   return (
     <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
       <div className="max-w-3xl mx-auto">
@@ -889,14 +1138,38 @@ function TrainingLog({ session, onLogout }) {
               Log
             </h1>
           </div>
-          <button
-            type="button"
-            onClick={onLogout}
-            className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900 shrink-0 mt-1"
-          >
-            <LogOut size={14} /> Log out
-          </button>
+          <div className="flex items-center gap-4 shrink-0 mt-1">
+            <button
+              type="button"
+              onClick={() => setProfileOpen(true)}
+              className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900"
+            >
+              <User size={14} /> Profile
+            </button>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-900"
+            >
+              <LogOut size={14} /> Log out
+            </button>
+          </div>
         </div>
+
+        {profileOpen && (
+          profile ? (
+            <ProfileModal
+              session={session}
+              profile={profile}
+              onClose={() => setProfileOpen(false)}
+              onSaved={(updated) => setProfile(updated)}
+            />
+          ) : (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+              <p className="text-sm text-white">Loading…</p>
+            </div>
+          )
+        )}
 
         <div className="mt-8 border-b border-neutral-300" />
 
@@ -984,8 +1257,8 @@ function TrainingLog({ session, onLogout }) {
                       inputMode="decimal"
                       value={entry.weight}
                       onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
-                      placeholder="Weight (kg)"
-                      aria-label={`Weight in kilograms for ${entry.exercise}`}
+                      placeholder={`Weight (${unitLabel})`}
+                      aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
                       className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
                     <button
