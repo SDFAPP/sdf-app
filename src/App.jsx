@@ -507,6 +507,87 @@ const EXERCISE_LIBRARY = [
   "Tricep Pushdown", "Turkish Get-Up", "Upright Row", "Wall Ball", "Wall Sit",
 ];
 
+// Which workout categories each exercise belongs to — an exercise can fit
+// more than one (e.g. a kettlebell swing is used in both strength and HIIT
+// sessions). Drives the category filter on the exercise library list.
+const EXERCISE_CATEGORIES = {
+  "Arnold Press": ["Strength Training"],
+  "Back Extension": ["Strength Training"],
+  "Back Squat": ["Strength Training"],
+  "Barbell Row": ["Strength Training"],
+  "Battle Ropes": ["Sprint Interval Training", "High Intensity Interval Training"],
+  "Bench Press": ["Strength Training"],
+  "Bent-Over Row": ["Strength Training"],
+  "Biceps Curl": ["Strength Training"],
+  "Box Jump": ["Plyometrics", "High Intensity Interval Training"],
+  "Bulgarian Split Squat": ["Strength Training"],
+  "Burpee": ["High Intensity Interval Training", "Plyometrics"],
+  "Cable Crossover": ["Strength Training"],
+  "Cable Row": ["Strength Training"],
+  "Calf Raise": ["Strength Training"],
+  "Chest Fly": ["Strength Training"],
+  "Chin-Up": ["Strength Training"],
+  "Clean and Jerk": ["Strength Training", "High Intensity Interval Training"],
+  "Close-Grip Bench Press": ["Strength Training"],
+  "Concentration Curl": ["Strength Training"],
+  "Deadlift": ["Strength Training"],
+  "Deficit Deadlift": ["Strength Training"],
+  "Dumbbell Press": ["Strength Training"],
+  "Dumbbell Row": ["Strength Training"],
+  "Face Pull": ["Strength Training", "Deload"],
+  "Farmer's Carry": ["Strength Training", "High Intensity Interval Training"],
+  "Front Squat": ["Strength Training"],
+  "Glute Bridge": ["Strength Training", "Deload"],
+  "Goblet Squat": ["Strength Training"],
+  "Hack Squat": ["Strength Training"],
+  "Hammer Curl": ["Strength Training"],
+  "Hanging Leg Raise": ["Strength Training"],
+  "Hip Thrust": ["Strength Training"],
+  "Incline Bench Press": ["Strength Training"],
+  "Jump Rope": ["Sprint Interval Training", "High Intensity Interval Training"],
+  "Jump Squat": ["Plyometrics", "High Intensity Interval Training"],
+  "Kettlebell Swing": ["High Intensity Interval Training", "Strength Training"],
+  "Lat Pulldown": ["Strength Training"],
+  "Lateral Raise": ["Strength Training"],
+  "Leg Curl": ["Strength Training"],
+  "Leg Extension": ["Strength Training"],
+  "Leg Press": ["Strength Training"],
+  "Lunges": ["Strength Training"],
+  "Mountain Climbers": ["High Intensity Interval Training"],
+  "Overhead Press": ["Strength Training"],
+  "Pistol Squat": ["Strength Training", "Plyometrics"],
+  "Plank": ["Deload", "Strength Training"],
+  "Plyo Push-Up": ["Plyometrics", "High Intensity Interval Training"],
+  "Pull-Up": ["Strength Training"],
+  "Push Press": ["Strength Training", "High Intensity Interval Training"],
+  "Push-Up": ["Strength Training", "Deload"],
+  "Renegade Row": ["Strength Training", "High Intensity Interval Training"],
+  "Reverse Lunge": ["Strength Training"],
+  "Romanian Deadlift": ["Strength Training"],
+  "Rowing Sprint": ["Sprint Interval Training"],
+  "Russian Twist": ["High Intensity Interval Training", "Deload"],
+  "Seated Row": ["Strength Training"],
+  "Shoulder Press": ["Strength Training"],
+  "Shrugs": ["Strength Training"],
+  "Side Plank": ["Deload", "Strength Training"],
+  "Skater Jump": ["Plyometrics", "High Intensity Interval Training"],
+  "Sled Push": ["Sprint Interval Training", "High Intensity Interval Training"],
+  "Snatch": ["Strength Training", "High Intensity Interval Training"],
+  "Sprint (Track)": ["Sprint Interval Training"],
+  "Squat Jump": ["Plyometrics", "High Intensity Interval Training"],
+  "Standing Calf Raise": ["Strength Training"],
+  "Step-Up": ["Strength Training"],
+  "Sumo Deadlift": ["Strength Training"],
+  "T-Bar Row": ["Strength Training"],
+  "Thruster": ["High Intensity Interval Training", "Strength Training"],
+  "Tricep Dip": ["Strength Training"],
+  "Tricep Pushdown": ["Strength Training"],
+  "Turkish Get-Up": ["Strength Training", "Deload"],
+  "Upright Row": ["Strength Training"],
+  "Wall Ball": ["High Intensity Interval Training"],
+  "Wall Sit": ["Deload", "Strength Training"],
+};
+
 // Per-exercise form guides shown in the library detail modal. Only a few
 // are filled in as a proof of concept — the rest fall back to a
 // "coming soon" state in ExerciseDetailModal until this is built out.
@@ -787,9 +868,12 @@ function TrainingLog({ session, onLogout }) {
 
   const filteredLibrary = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return EXERCISE_LIBRARY;
-    return EXERCISE_LIBRARY.filter((ex) => ex.toLowerCase().includes(q));
-  }, [search]);
+    return EXERCISE_LIBRARY.filter((ex) => {
+      const inCategory = (EXERCISE_CATEGORIES[ex] || []).includes(activeCategory);
+      const matchesSearch = !q || ex.toLowerCase().includes(q);
+      return inCategory && matchesSearch;
+    });
+  }, [search, activeCategory]);
 
   return (
     <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
@@ -1294,9 +1378,12 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
 
   const filteredLibrary = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return EXERCISE_LIBRARY;
-    return EXERCISE_LIBRARY.filter((ex) => ex.toLowerCase().includes(q));
-  }, [search]);
+    return EXERCISE_LIBRARY.filter((ex) => {
+      const inCategory = (EXERCISE_CATEGORIES[ex] || []).includes(activeCategory);
+      const matchesSearch = !q || ex.toLowerCase().includes(q);
+      return inCategory && matchesSearch;
+    });
+  }, [search, activeCategory]);
 
   return (
     <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
