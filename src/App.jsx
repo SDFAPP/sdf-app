@@ -507,6 +507,26 @@ const EXERCISE_LIBRARY = [
   "Tricep Pushdown", "Turkish Get-Up", "Upright Row", "Wall Ball", "Wall Sit",
 ];
 
+// Per-exercise form guides shown in the library detail modal. Only a few
+// are filled in as a proof of concept — the rest fall back to a
+// "coming soon" state in ExerciseDetailModal until this is built out.
+const EXERCISE_DETAILS = {
+  "Back Squat": {
+    muscles: {
+      primary: ["Quadriceps", "Glutes"],
+      secondary: ["Hamstrings", "Lower back", "Core"],
+    },
+    steps: [
+      "Set the barbell on a rack at about shoulder height and step under it, resting the bar across your upper traps — not your neck.",
+      "Grip the bar just outside shoulder width, lift it off the rack, and step back into a stance about shoulder-width apart with toes turned slightly out.",
+      "Brace your core, keep your chest up, and push your hips back as you bend your knees to start lowering down.",
+      "Descend until your thighs are at least parallel to the floor, keeping your knees tracking over your toes and your heels flat on the ground.",
+      "Drive through your heels and mid-foot to stand back up, keeping your chest up and your back neutral throughout.",
+      "Fully extend your hips and knees at the top without leaning back, then repeat.",
+    ],
+  },
+};
+
 function timeAgo(iso) {
   const diffMs = Date.now() - new Date(iso).getTime();
   const mins = Math.round(diffMs / 60000);
@@ -516,6 +536,129 @@ function timeAgo(iso) {
   const days = Math.round(hours / 24);
   if (days < 7) return `${days}d ago`;
   return new Date(iso).toLocaleDateString();
+}
+
+// A simplified front/back body silhouette with the worked muscles shaded.
+// Same illustration technique for both — the outline is identical, only
+// the highlighted regions differ between the front and back copy.
+function MuscleMap({ primary = [], secondary = [] }) {
+  const body = (cx) => (
+    <>
+      <circle cx={cx} cy="60" r="18" fill="#E8B792" />
+      <line x1={cx} y1="78" x2={cx} y2="90" stroke="#E8B792" strokeWidth="14" strokeLinecap="round" />
+      <line x1={cx} y1="90" x2={cx} y2="210" stroke="#C7C7C7" strokeWidth="70" strokeLinecap="round" />
+      <line x1={cx - 35} y1="100" x2={cx - 45} y2="205" stroke="#E8B792" strokeWidth="16" strokeLinecap="round" />
+      <line x1={cx + 35} y1="100" x2={cx + 45} y2="205" stroke="#E8B792" strokeWidth="16" strokeLinecap="round" />
+      <line x1={cx - 18} y1="205" x2={cx - 20} y2="290" stroke="#E8B792" strokeWidth="26" strokeLinecap="round" />
+      <line x1={cx + 18} y1="205" x2={cx + 20} y2="290" stroke="#E8B792" strokeWidth="26" strokeLinecap="round" />
+      <line x1={cx - 20} y1="290" x2={cx - 20} y2="380" stroke="#E8B792" strokeWidth="20" strokeLinecap="round" />
+      <line x1={cx + 20} y1="290" x2={cx + 20} y2="380" stroke="#E8B792" strokeWidth="20" strokeLinecap="round" />
+    </>
+  );
+
+  const has = (list, name) => list.some((m) => m.toLowerCase() === name.toLowerCase());
+
+  return (
+    <svg width="100%" viewBox="0 0 680 460" role="img">
+      <title>Muscles worked</title>
+      <desc>Front and back body outline highlighting the primary and secondary muscles worked by this exercise.</desc>
+
+      {body(170)}
+      {has(primary, "Quadriceps") && (
+        <>
+          <ellipse cx="150" cy="255" rx="16" ry="45" fill="#E76F51" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.9" />
+          <ellipse cx="190" cy="255" rx="16" ry="45" fill="#E76F51" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.9" />
+        </>
+      )}
+      {has(secondary, "Core") && <rect x="148" y="150" width="44" height="55" rx="8" fill="#2A9D8F" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.9" />}
+
+      {body(510)}
+      {has(primary, "Glutes") && <ellipse cx="510" cy="215" rx="30" ry="22" fill="#E76F51" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.9" />}
+      {has(secondary, "Hamstrings") && (
+        <>
+          <ellipse cx="490" cy="265" rx="14" ry="40" fill="#2A9D8F" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.9" />
+          <ellipse cx="530" cy="265" rx="14" ry="40" fill="#2A9D8F" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.9" />
+        </>
+      )}
+      {has(secondary, "Lower back") && <rect x="492" y="155" width="36" height="40" rx="8" fill="#2A9D8F" stroke="#FFFFFF" strokeWidth="1.5" opacity="0.8" />}
+
+      <text x="170" y="415" fill="#171717" fontSize="14" textAnchor="middle">Front</text>
+      <text x="510" y="415" fill="#171717" fontSize="14" textAnchor="middle">Back</text>
+
+      <circle cx="240" cy="445" r="6" fill="#E76F51" />
+      <text x="252" y="449" fill="#737373" fontSize="12" textAnchor="start">Primary</text>
+      <circle cx="340" cy="445" r="6" fill="#2A9D8F" />
+      <text x="352" y="449" fill="#737373" fontSize="12" textAnchor="start">Secondary</text>
+    </svg>
+  );
+}
+
+function ExerciseDetailModal({ name, onClose, onAdd }) {
+  const detail = EXERCISE_DETAILS[name];
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={onClose}>
+      <div
+        className="bg-white w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={name}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-200 sticky top-0 bg-white">
+          <h3 className="text-lg font-bold text-neutral-900">{name}</h3>
+          <button type="button" onClick={onClose} aria-label="Close" className="text-neutral-400 hover:text-neutral-900">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-6">
+          <div className="aspect-video bg-neutral-100 border border-neutral-200 flex flex-col items-center justify-center gap-2 text-neutral-400">
+            <Play size={28} strokeWidth={1.5} />
+            <p className="text-xs text-center px-6">
+              Video demonstration — connect an exercise database API to enable this.
+            </p>
+          </div>
+
+          {detail ? (
+            <>
+              <div>
+                <MuscleMap primary={detail.muscles.primary} secondary={detail.muscles.secondary} />
+              </div>
+
+              <div>
+                <p className="text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-3">
+                  How to do it
+                </p>
+                <ol className="space-y-2.5">
+                  {detail.steps.map((step, i) => (
+                    <li key={i} className="flex gap-3 text-sm text-neutral-700 leading-relaxed">
+                      <span className="shrink-0 font-semibold text-neutral-400">{i + 1}.</span>
+                      <span>{step}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm text-neutral-500">
+              A detailed guide for this exercise is coming soon.
+            </p>
+          )}
+        </div>
+
+        <div className="flex gap-3 px-5 py-4 border-t border-neutral-200 sticky bottom-0 bg-white">
+          <button
+            type="button"
+            onClick={onAdd}
+            className="flex-1 flex items-center justify-center gap-1.5 bg-neutral-900 text-white text-sm font-medium py-3 hover:bg-neutral-800 transition-colors"
+          >
+            <Plus size={14} /> Add to workout
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function TrainingLog({ session, onLogout }) {
@@ -530,6 +673,7 @@ function TrainingLog({ session, onLogout }) {
   const [saveError, setSaveError] = useState("");
 
   const [search, setSearch] = useState("");
+  const [viewingExercise, setViewingExercise] = useState(null);
 
   // Guards against a slow, stale request overwriting newer results if the
   // user switches categories again before the first fetch resolves.
@@ -855,18 +999,40 @@ function TrainingLog({ session, onLogout }) {
               </p>
             ) : (
               filteredLibrary.map((ex) => (
-                <button
+                <div
                   key={ex}
-                  type="button"
-                  onClick={() => addExerciseToWorkout(ex)}
-                  className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-left text-neutral-700 border-b border-neutral-100 last:border-0 hover:bg-neutral-50 transition-colors"
+                  className="w-full flex items-center justify-between border-b border-neutral-100 last:border-0 hover:bg-neutral-50 transition-colors"
                 >
-                  {ex}
-                  <Plus size={14} className="text-neutral-300" />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewingExercise(ex)}
+                    className="flex-1 text-left px-4 py-2.5 text-sm text-neutral-700"
+                  >
+                    {ex}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addExerciseToWorkout(ex)}
+                    aria-label={`Add ${ex} to workout`}
+                    className="px-3 py-2.5 text-neutral-300 hover:text-neutral-900"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
               ))
             )}
           </div>
+
+          {viewingExercise && (
+            <ExerciseDetailModal
+              name={viewingExercise}
+              onClose={() => setViewingExercise(null)}
+              onAdd={() => {
+                addExerciseToWorkout(viewingExercise);
+                setViewingExercise(null);
+              }}
+            />
+          )}
         </div>
       </div>
     </div>
