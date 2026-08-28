@@ -38,10 +38,17 @@ async function refreshAccessToken(refreshToken) {
 // inside an artifact preview), we keep one "which screen" state
 // here and every part of the app just asks to change it.
 // ============================================================
+function parseRecoveryToken() {
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : window.location.hash;
+  const params = new URLSearchParams(hash);
+  return params.get("type") === "recovery" && params.get("access_token") ? params.get("access_token") : null;
+}
+
 export default function StudioDefineApp() {
   const [screen, setScreen] = useState("auth"); // auth | client-dashboard | coach-dashboard
   const [session, setSession] = useState(null);
   const [restoring, setRestoring] = useState(true);
+  const [recoveryToken, setRecoveryToken] = useState(parseRecoveryToken);
 
   function handleAuthed(signInData, role, remember) {
     setSession({ ...signInData, role });
@@ -113,6 +120,18 @@ export default function StudioDefineApp() {
     return () => clearInterval(id);
   }, [session?.refresh_token]);
 
+  if (recoveryToken) {
+    return (
+      <ResetPasswordScreen
+        accessToken={recoveryToken}
+        onDone={() => {
+          window.history.replaceState(null, "", window.location.pathname + window.location.search);
+          setRecoveryToken(null);
+        }}
+      />
+    );
+  }
+
   if (restoring) {
     return (
       <div className="min-h-screen w-full bg-[#F5F4F1] flex items-center justify-center">
@@ -128,6 +147,117 @@ export default function StudioDefineApp() {
     return <CoachDashboard session={session} onLogout={handleLogout} />;
   }
   return <AuthScreen onAuthed={handleAuthed} />;
+}
+
+// ============================================================
+// Reset password — the page a "forgot password" email link lands on.
+// Supabase puts the recovery access_token in the URL fragment; once
+// we've got it we can call /auth/v1/user directly to set a new one.
+// ============================================================
+function ResetPasswordScreen({ accessToken, onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    if (password.length < 8) return setError("Password needs to be at least 8 characters.");
+    if (password !== confirmPassword) return setError("Passwords don't match.");
+
+    setSubmitting(true);
+    try {
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+        method: "PUT",
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.msg || data.error_description || "Could not update your password.");
+      setDone(true);
+    } catch (err) {
+      setError(err.message || "Something went wrong. Try requesting a new reset link.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen w-full bg-[#F5F4F1] flex items-center justify-center px-5">
+      <div className="w-full max-w-sm">
+        <p className="text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-3">
+          Studio Define Fitness
+        </p>
+        <h2 className="text-3xl font-black tracking-tight text-neutral-900 mb-6">
+          {done ? "Password updated" : "Set a new password"}
+        </h2>
+
+        {done ? (
+          <>
+            <p className="text-sm text-neutral-500 leading-relaxed mb-6">
+              Your password has been updated. You can log in with it now.
+            </p>
+            <button
+              type="button"
+              onClick={onDone}
+              className="w-full bg-neutral-900 text-white text-sm font-medium py-3.5 hover:bg-neutral-800 transition-colors"
+            >
+              Continue to login
+            </button>
+          </>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label htmlFor="reset-password" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+                New password
+              </label>
+              <input
+                id="reset-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="At least 8 characters"
+                className="w-full border border-neutral-300 px-4 py-3 text-base sm:text-sm text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+              />
+            </div>
+            <div>
+              <label htmlFor="reset-confirm" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+                Confirm new password
+              </label>
+              <input
+                id="reset-confirm"
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter your new password"
+                className="w-full border border-neutral-300 px-4 py-3 text-base sm:text-sm text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+              />
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-600" role="alert">
+                {error}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full bg-neutral-900 text-white text-sm font-medium py-3.5 hover:bg-neutral-800 transition-colors disabled:opacity-60"
+            >
+              {submitting ? "Saving…" : "Save new password"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ============================================================
@@ -147,10 +277,35 @@ function AuthScreen({ onAuthed }) {
   const [remember, setRemember] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [screen, setScreen] = useState("form"); // form | pending | rejected | check-email
+  const [screen, setScreen] = useState("form"); // form | pending | rejected | check-email | forgot-password | reset-sent
 
   const isRegisterTab = activeTab === "client-register" || activeTab === "coach-register";
   const isCoachTab = activeTab === "coach-login" || activeTab === "coach-register";
+
+  async function handleForgotPassword(e) {
+    e.preventDefault();
+    setError("");
+    if (!email) return setError("Enter your email first.");
+
+    setSubmitting(true);
+    try {
+      const redirectTo = encodeURIComponent(window.location.origin + window.location.pathname);
+      const res = await fetch(`${SUPABASE_URL}/auth/v1/recover?redirect_to=${redirectTo}`, {
+        method: "POST",
+        headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.msg || data.error_description || "Could not send reset email.");
+      }
+      setScreen("reset-sent");
+    } catch (err) {
+      setError(err.message || "Something went wrong. Try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   async function supabaseSignUp(role) {
     const res = await fetch(`${SUPABASE_URL}/auth/v1/signup`, {
@@ -359,6 +514,68 @@ function AuthScreen({ onAuthed }) {
               </div>
             )}
 
+            {screen === "forgot-password" && (
+              <form onSubmit={handleForgotPassword} className="mt-7 space-y-5">
+                <p className="text-sm text-neutral-500 leading-relaxed">
+                  Enter your email and we'll send you a link to set a new password.
+                </p>
+                <div>
+                  <label htmlFor="forgot-email" className="block text-[11px] tracking-[0.15em] font-semibold uppercase text-neutral-500 mb-2">
+                    Email
+                  </label>
+                  <input
+                    id="forgot-email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="w-full border border-neutral-300 px-4 py-3 text-base sm:text-sm text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+                  />
+                </div>
+
+                {error && (
+                  <p className="text-sm text-red-600" role="alert">
+                    {error}
+                  </p>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full bg-neutral-900 text-white text-sm font-medium py-3.5 hover:bg-neutral-800 transition-colors disabled:opacity-60"
+                >
+                  {submitting ? "Sending…" : "Send reset link"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError("");
+                    setScreen("form");
+                  }}
+                  className="w-full text-sm text-neutral-500 hover:text-neutral-900"
+                >
+                  Back to login
+                </button>
+              </form>
+            )}
+
+            {screen === "reset-sent" && (
+              <div className="mt-8 border border-neutral-200 p-6 text-center">
+                <h3 className="font-semibold text-neutral-900">Check your email</h3>
+                <p className="mt-2 text-sm text-neutral-500 leading-relaxed">
+                  If an account exists for {email}, we've sent a link to reset
+                  your password.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setScreen("form")}
+                  className="mt-4 text-sm text-neutral-500 hover:text-neutral-900 underline"
+                >
+                  Back to login
+                </button>
+              </div>
+            )}
+
             {screen === "form" && (
               <form onSubmit={handleSubmit} className="mt-7 space-y-5">
                 {isRegisterTab && (
@@ -403,6 +620,18 @@ function AuthScreen({ onAuthed }) {
                     placeholder="At least 8 characters"
                     className="w-full border border-neutral-300 px-4 py-3 text-base sm:text-sm text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
                   />
+                  {!isRegisterTab && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setError("");
+                        setScreen("forgot-password");
+                      }}
+                      className="mt-2 text-xs text-neutral-500 hover:text-neutral-900 underline"
+                    >
+                      Forgot your password?
+                    </button>
+                  )}
                 </div>
 
                 {error && (
