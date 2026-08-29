@@ -1414,7 +1414,7 @@ function TrainingLog({ session, onLogout }) {
   function addExerciseToWorkout(name) {
     setWorkoutEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "10", rest: "60", sets: "3" },
+      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "5", rest: "1", sets: "3" },
     ]);
     setBuilderOpen(true);
   }
@@ -1624,14 +1624,15 @@ function TrainingLog({ session, onLogout }) {
                     <span className="text-xs text-neutral-400">reps</span>
                     <input
                       type="number"
-                      inputMode="numeric"
+                      inputMode="decimal"
+                      step="0.5"
                       value={entry.rest}
                       onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
                       placeholder="Rest"
-                      aria-label={`Rest in seconds for ${entry.exercise}`}
+                      aria-label={`Rest in minutes for ${entry.exercise}`}
                       className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
-                    <span className="text-xs text-neutral-400">sec rest</span>
+                    <span className="text-xs text-neutral-400">min rest</span>
                     <input
                       type="number"
                       inputMode="numeric"
@@ -1963,7 +1964,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   function addExerciseToWorkout(name) {
     setWorkoutEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "10", rest: "60", sets: "3" },
+      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "5", rest: "1", sets: "3" },
     ]);
     setBuilderOpen(true);
   }
@@ -2153,14 +2154,15 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                       <span className="text-xs text-neutral-400">reps</span>
                       <input
                         type="number"
-                        inputMode="numeric"
+                        inputMode="decimal"
+                        step="0.5"
                         value={entry.rest}
                         onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
                         placeholder="Rest"
-                        aria-label={`Rest in seconds for ${entry.exercise}`}
+                        aria-label={`Rest in minutes for ${entry.exercise}`}
                         className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
-                      <span className="text-xs text-neutral-400">sec rest</span>
+                      <span className="text-xs text-neutral-400">min rest</span>
                       <input
                         type="number"
                         inputMode="numeric"
