@@ -1414,7 +1414,7 @@ function TrainingLog({ session, onLogout }) {
   function addExerciseToWorkout(name) {
     setWorkoutEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), exercise: name, sets: "3", reps: "10", weight: "" },
+      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "10", rest: "60", sets: "3" },
     ]);
     setBuilderOpen(true);
   }
@@ -1445,6 +1445,10 @@ function TrainingLog({ session, onLogout }) {
       }
       if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
         setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
+        return;
+      }
+      if (entry.rest.trim() !== "" && !(Number(entry.rest) >= 0)) {
+        setSaveError(`Enter a valid rest time for ${entry.exercise}, or leave it blank.`);
         return;
       }
     }
@@ -1600,15 +1604,14 @@ function TrainingLog({ session, onLogout }) {
                       {entry.exercise}
                     </span>
                     <input
-                      type="number"
-                      inputMode="numeric"
-                      value={entry.sets}
-                      onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
-                      placeholder="Sets"
-                      aria-label={`Sets for ${entry.exercise}`}
-                      className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      type="text"
+                      inputMode="decimal"
+                      value={entry.weight}
+                      onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
+                      placeholder={`Weight (${unitLabel})`}
+                      aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
+                      className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
-                    <span className="text-xs text-neutral-400">sets</span>
                     <input
                       type="number"
                       inputMode="numeric"
@@ -1620,14 +1623,25 @@ function TrainingLog({ session, onLogout }) {
                     />
                     <span className="text-xs text-neutral-400">reps</span>
                     <input
-                      type="text"
-                      inputMode="decimal"
-                      value={entry.weight}
-                      onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
-                      placeholder={`Weight (${unitLabel})`}
-                      aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
-                      className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      type="number"
+                      inputMode="numeric"
+                      value={entry.rest}
+                      onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
+                      placeholder="Rest"
+                      aria-label={`Rest in seconds for ${entry.exercise}`}
+                      className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
+                    <span className="text-xs text-neutral-400">sec rest</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={entry.sets}
+                      onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
+                      placeholder="Sets"
+                      aria-label={`Sets for ${entry.exercise}`}
+                      className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                    />
+                    <span className="text-xs text-neutral-400">sets</span>
                     <button
                       type="button"
                       onClick={() => removeEntry(entry.id)}
@@ -1949,7 +1963,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   function addExerciseToWorkout(name) {
     setWorkoutEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), exercise: name, sets: "3", reps: "10", weight: "" },
+      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "10", rest: "60", sets: "3" },
     ]);
     setBuilderOpen(true);
   }
@@ -1980,6 +1994,10 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       }
       if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
         setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
+        return;
+      }
+      if (entry.rest.trim() !== "" && !(Number(entry.rest) >= 0)) {
+        setSaveError(`Enter a valid rest time for ${entry.exercise}, or leave it blank.`);
         return;
       }
     }
@@ -2115,15 +2133,14 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                         {entry.exercise}
                       </span>
                       <input
-                        type="number"
-                        inputMode="numeric"
-                        value={entry.sets}
-                        onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
-                        placeholder="Sets"
-                        aria-label={`Sets for ${entry.exercise}`}
-                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                        type="text"
+                        inputMode="decimal"
+                        value={entry.weight}
+                        onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
+                        placeholder={`Weight (${unitLabel})`}
+                        aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
+                        className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
-                      <span className="text-xs text-neutral-400">sets</span>
                       <input
                         type="number"
                         inputMode="numeric"
@@ -2135,14 +2152,25 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                       />
                       <span className="text-xs text-neutral-400">reps</span>
                       <input
-                        type="text"
-                        inputMode="decimal"
-                        value={entry.weight}
-                        onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
-                        placeholder={`Weight (${unitLabel})`}
-                        aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
-                        className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                        type="number"
+                        inputMode="numeric"
+                        value={entry.rest}
+                        onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
+                        placeholder="Rest"
+                        aria-label={`Rest in seconds for ${entry.exercise}`}
+                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
+                      <span className="text-xs text-neutral-400">sec rest</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        value={entry.sets}
+                        onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
+                        placeholder="Sets"
+                        aria-label={`Sets for ${entry.exercise}`}
+                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      />
+                      <span className="text-xs text-neutral-400">sets</span>
                       <button
                         type="button"
                         onClick={() => removeEntry(entry.id)}
