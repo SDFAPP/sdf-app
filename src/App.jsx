@@ -789,7 +789,7 @@ const EXERCISE_CATEGORIES = {
   "Incline Bench Press": ["Strength Training"],
   "Jump Rope": ["Sprint Interval Training", "High Intensity Interval Training"],
   "Jump Squat": ["Plyometrics", "High Intensity Interval Training"],
-  "Kettlebell Swing": ["High Intensity Interval Training", "Strength Training"],
+  "Kettlebell Swing": ["High Intensity Interval Training", "Strength Training", "Sprint Interval Training"],
   "Lat Pulldown": ["Strength Training", "Deload"],
   "Lateral Raise": ["Strength Training"],
   "Leg Curl": ["Strength Training", "Deload"],
@@ -1412,9 +1412,18 @@ function TrainingLog({ session, onLogout }) {
   }
 
   function addExerciseToWorkout(name) {
+    const isTimeBased = activeCategory === "Sprint Interval Training";
     setWorkoutEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "5", rest: "1", sets: "3" },
+      {
+        id: crypto.randomUUID(),
+        exercise: name,
+        weight: "",
+        reps: isTimeBased ? "" : "5",
+        time: isTimeBased ? "20" : "",
+        rest: isTimeBased ? "3" : "1",
+        sets: isTimeBased ? "6" : "3",
+      },
     ]);
     setBuilderOpen(true);
   }
@@ -1432,16 +1441,25 @@ function TrainingLog({ session, onLogout }) {
       setSaveError("Add at least one exercise before saving.");
       return;
     }
+    const isTimeBased = activeCategory === "Sprint Interval Training";
     for (const entry of workoutEntries) {
       const sets = Number(entry.sets);
-      const reps = Number(entry.reps);
       if (!Number.isInteger(sets) || sets <= 0) {
         setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
         return;
       }
-      if (!Number.isInteger(reps) || reps <= 0) {
-        setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
-        return;
+      if (isTimeBased) {
+        const time = Number(entry.time);
+        if (!Number.isInteger(time) || time <= 0) {
+          setSaveError(`Enter a valid sprint time for ${entry.exercise}.`);
+          return;
+        }
+      } else {
+        const reps = Number(entry.reps);
+        if (!Number.isInteger(reps) || reps <= 0) {
+          setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
+          return;
+        }
       }
       if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
         setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
@@ -1612,16 +1630,33 @@ function TrainingLog({ session, onLogout }) {
                       aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
                       className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      value={entry.reps}
-                      onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
-                      placeholder="Reps"
-                      aria-label={`Reps for ${entry.exercise}`}
-                      className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                    />
-                    <span className="text-xs text-neutral-400">reps</span>
+                    {activeCategory === "Sprint Interval Training" ? (
+                      <>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={entry.time}
+                          onChange={(e) => updateEntry(entry.id, "time", e.target.value)}
+                          placeholder="Time"
+                          aria-label={`Sprint time in seconds for ${entry.exercise}`}
+                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                        />
+                        <span className="text-xs text-neutral-400">sec sprint</span>
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={entry.reps}
+                          onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
+                          placeholder="Reps"
+                          aria-label={`Reps for ${entry.exercise}`}
+                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                        />
+                        <span className="text-xs text-neutral-400">reps</span>
+                      </>
+                    )}
                     <input
                       type="number"
                       inputMode="decimal"
@@ -1962,9 +1997,18 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   }
 
   function addExerciseToWorkout(name) {
+    const isTimeBased = activeCategory === "Sprint Interval Training";
     setWorkoutEntries((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), exercise: name, weight: "", reps: "5", rest: "1", sets: "3" },
+      {
+        id: crypto.randomUUID(),
+        exercise: name,
+        weight: "",
+        reps: isTimeBased ? "" : "5",
+        time: isTimeBased ? "20" : "",
+        rest: isTimeBased ? "3" : "1",
+        sets: isTimeBased ? "6" : "3",
+      },
     ]);
     setBuilderOpen(true);
   }
@@ -1982,16 +2026,25 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       setSaveError("Add at least one exercise before assigning.");
       return;
     }
+    const isTimeBased = activeCategory === "Sprint Interval Training";
     for (const entry of workoutEntries) {
       const sets = Number(entry.sets);
-      const reps = Number(entry.reps);
       if (!Number.isInteger(sets) || sets <= 0) {
         setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
         return;
       }
-      if (!Number.isInteger(reps) || reps <= 0) {
-        setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
-        return;
+      if (isTimeBased) {
+        const time = Number(entry.time);
+        if (!Number.isInteger(time) || time <= 0) {
+          setSaveError(`Enter a valid sprint time for ${entry.exercise}.`);
+          return;
+        }
+      } else {
+        const reps = Number(entry.reps);
+        if (!Number.isInteger(reps) || reps <= 0) {
+          setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
+          return;
+        }
       }
       if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
         setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
@@ -2142,16 +2195,33 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                         aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
                         className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        value={entry.reps}
-                        onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
-                        placeholder="Reps"
-                        aria-label={`Reps for ${entry.exercise}`}
-                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                      />
-                      <span className="text-xs text-neutral-400">reps</span>
+                      {activeCategory === "Sprint Interval Training" ? (
+                        <>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            value={entry.time}
+                            onChange={(e) => updateEntry(entry.id, "time", e.target.value)}
+                            placeholder="Time"
+                            aria-label={`Sprint time in seconds for ${entry.exercise}`}
+                            className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                          />
+                          <span className="text-xs text-neutral-400">sec sprint</span>
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            type="number"
+                            inputMode="numeric"
+                            value={entry.reps}
+                            onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
+                            placeholder="Reps"
+                            aria-label={`Reps for ${entry.exercise}`}
+                            className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                          />
+                          <span className="text-xs text-neutral-400">reps</span>
+                        </>
+                      )}
                       <input
                         type="number"
                         inputMode="decimal"
