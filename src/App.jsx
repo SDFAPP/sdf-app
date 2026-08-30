@@ -1658,7 +1658,7 @@ function TrainingLog({ session, onLogout }) {
                     <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
                       {entry.exercise}
                       <span className="block sm:inline sm:ml-1.5 text-xs font-normal text-neutral-400">
-                        {entry.category}
+                        {abbreviateCategory(entry.category)}
                       </span>
                     </span>
                     <input
@@ -2294,7 +2294,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                       <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
                         {entry.exercise}
                         <span className="block sm:inline sm:ml-1.5 text-xs font-normal text-neutral-400">
-                          {entry.category}
+                          {abbreviateCategory(entry.category)}
                         </span>
                       </span>
                       <input
