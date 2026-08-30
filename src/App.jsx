@@ -718,6 +718,16 @@ const CATEGORIES = [
   "Deload",
 ];
 
+// Short forms for the workout history list, where space is tight on mobile.
+const CATEGORY_ABBREVIATIONS = {
+  "Strength Training": "ST",
+  "Sprint Interval Training": "SIT",
+  "High Intensity Interval Training": "HIT",
+};
+function abbreviateCategory(cat) {
+  return CATEGORY_ABBREVIATIONS[cat] || cat;
+}
+
 const EXERCISE_LIBRARY = [
   "Ab Crunch Machine", "Arnold Press", "Assault Bike Sprint", "Assisted Dip", "Assisted Pull-Up",
   "Back Extension", "Back Squat", "Band Pull-Apart", "Barbell Curl", "Barbell Row",
@@ -1761,7 +1771,7 @@ function TrainingLog({ session, onLogout }) {
                 return (
                   <li key={w.id} className="flex items-center justify-between px-4 py-3">
                     <span className="text-sm text-neutral-800">
-                      {cats.join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
+                      {cats.map(abbreviateCategory).join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
                       {w.status === "assigned" && (
                         <span className="ml-2 text-xs text-amber-600 uppercase tracking-wide">Not completed</span>
                       )}
@@ -2447,7 +2457,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   return (
                     <li key={w.id} className="flex items-center justify-between px-4 py-3">
                       <span className="text-sm text-neutral-800">
-                        {cats.join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
+                        {cats.map(abbreviateCategory).join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
                         <span
                           className={`ml-2 text-xs font-medium uppercase tracking-wide ${
                             w.status === "completed" ? "text-emerald-700" : "text-amber-600"
