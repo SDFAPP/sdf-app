@@ -1344,6 +1344,8 @@ function TrainingLog({ session, onLogout }) {
 
   const [builderOpen, setBuilderOpen] = useState(false);
   const [workoutEntries, setWorkoutEntries] = useState([]);
+  const [todaysWorkoutId, setTodaysWorkoutId] = useState(null);
+  const [todaysStatus, setTodaysStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
@@ -1370,44 +1372,51 @@ function TrainingLog({ session, onLogout }) {
     })();
   }, []);
 
-  // Guards against a slow, stale request overwriting newer results if the
-  // user switches categories again before the first fetch resolves.
-  const activeCategoryRef = useRef(activeCategory);
+  // One consolidated workout row per client per day — load today's (if any)
+  // to pre-fill the builder for editing/completing, and the rest of the
+  // history (past days only) as a separate list below it.
   useEffect(() => {
-    activeCategoryRef.current = activeCategory;
-  }, [activeCategory]);
+    loadToday();
+    loadHistory();
+  }, []);
 
-  useEffect(() => {
-    loadHistory(activeCategory);
-    setBuilderOpen(false);
-    setWorkoutEntries([]);
-    setSaveError("");
-  }, [activeCategory]);
+  async function loadToday() {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${session.user.id}&workout_date=eq.${today}&select=id,status,entries&limit=1`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      const rows = await res.json();
+      if (rows[0]) {
+        setTodaysWorkoutId(rows[0].id);
+        setTodaysStatus(rows[0].status);
+        setWorkoutEntries((rows[0].entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
+        setBuilderOpen(true);
+      }
+    } catch {
+      // Worst case a coach-assigned session for today just doesn't pre-load
+      // — the client can still build a fresh workout from scratch.
+    }
+  }
 
-  async function loadHistory(category) {
+  async function loadHistory() {
     setHistoryLoading(true);
     setHistoryError("");
     try {
+      const today = new Date().toISOString().slice(0, 10);
       const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${session.user.id}&category=eq.${encodeURIComponent(
-          category
-        )}&select=id,title,created_at&order=created_at.desc&limit=10`,
-        {
-          headers: {
-            apikey: SUPABASE_ANON_KEY,
-            Authorization: `Bearer ${session.access_token}`,
-          },
-        }
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${session.user.id}&workout_date=lt.${today}&select=id,workout_date,status,entries,category&order=workout_date.desc&limit=10`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
       );
-      if (category !== activeCategoryRef.current) return;
       if (!res.ok) throw new Error("Could not load your workout history.");
       setHistory(await res.json());
     } catch (err) {
-      if (category !== activeCategoryRef.current) return;
       setHistory([]);
       setHistoryError(err.message || "Could not load your workout history.");
     } finally {
-      if (category === activeCategoryRef.current) setHistoryLoading(false);
+      setHistoryLoading(false);
     }
   }
 
@@ -1418,6 +1427,7 @@ function TrainingLog({ session, onLogout }) {
       {
         id: crypto.randomUUID(),
         exercise: name,
+        category: activeCategory,
         weight: "",
         reps: isTimeBased ? "" : "5",
         time: isTimeBased ? "20" : "",
@@ -1441,14 +1451,13 @@ function TrainingLog({ session, onLogout }) {
       setSaveError("Add at least one exercise before saving.");
       return;
     }
-    const isTimeBased = activeCategory === "Sprint Interval Training";
     for (const entry of workoutEntries) {
       const sets = Number(entry.sets);
       if (!Number.isInteger(sets) || sets <= 0) {
         setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
         return;
       }
-      if (isTimeBased) {
+      if (entry.category === "Sprint Interval Training") {
         const time = Number(entry.time);
         if (!Number.isInteger(time) || time <= 0) {
           setSaveError(`Enter a valid sprint time for ${entry.exercise}.`);
@@ -1473,28 +1482,41 @@ function TrainingLog({ session, onLogout }) {
     setSaving(true);
     setSaveError("");
     try {
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/workouts`, {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${session.access_token}`,
-          "Content-Type": "application/json",
-          Prefer: "return=representation",
-        },
-        body: JSON.stringify({
-          client_id: session.user.id,
-          category: activeCategory,
-          title: `${activeCategory} — ${workoutEntries.length} exercise${workoutEntries.length === 1 ? "" : "s"}`,
-          entries: workoutEntries.map(({ id, ...rest }) => rest),
-        }),
-      });
+      const body = { entries: workoutEntries.map(({ id, ...rest }) => rest), status: "completed" };
+      const res = todaysWorkoutId
+        ? await fetch(`${SUPABASE_URL}/rest/v1/workouts?id=eq.${todaysWorkoutId}`, {
+            method: "PATCH",
+            headers: {
+              apikey: SUPABASE_ANON_KEY,
+              Authorization: `Bearer ${session.access_token}`,
+              "Content-Type": "application/json",
+              Prefer: "return=representation",
+            },
+            body: JSON.stringify(body),
+          })
+        : await fetch(`${SUPABASE_URL}/rest/v1/workouts`, {
+            method: "POST",
+            headers: {
+              apikey: SUPABASE_ANON_KEY,
+              Authorization: `Bearer ${session.access_token}`,
+              "Content-Type": "application/json",
+              Prefer: "return=representation",
+            },
+            body: JSON.stringify({
+              client_id: session.user.id,
+              workout_date: new Date().toISOString().slice(0, 10),
+              ...body,
+            }),
+          });
       if (res.status === 401 || res.status === 403) {
         throw new Error("Your session may have expired. Try logging out and back in.");
       }
       if (!res.ok) throw new Error("Could not save workout.");
-      setWorkoutEntries([]);
-      setBuilderOpen(false);
-      loadHistory(activeCategory);
+      const rows = await res.json();
+      if (rows[0]) {
+        setTodaysWorkoutId(rows[0].id);
+        setTodaysStatus(rows[0].status);
+      }
     } catch (err) {
       setSaveError(err.message || "Something went wrong saving this workout.");
     } finally {
@@ -1589,10 +1611,10 @@ function TrainingLog({ session, onLogout }) {
         <div className="mt-6 flex items-center justify-between gap-4">
           <div>
             <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
-              {activeCategory}
+              {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
             </p>
             <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900">
-              Build your workout.
+              Today's workout.
             </h2>
           </div>
           <button
@@ -1607,9 +1629,14 @@ function TrainingLog({ session, onLogout }) {
 
         {builderOpen && (
           <div className="mt-6 border border-neutral-200 bg-white p-5">
+            {todaysStatus === "assigned" && (
+              <p className="mb-4 border border-amber-200 bg-amber-50 text-amber-800 text-sm px-3 py-2.5">
+                Your coach assigned this workout for today. Adjust anything you need, then save when you're done.
+              </p>
+            )}
             {workoutEntries.length === 0 ? (
               <p className="text-sm text-neutral-500">
-                Search the exercise library below and click an exercise to add it here.
+                Search the exercise library below (use the category tabs above to browse) and click an exercise to add it here.
               </p>
             ) : (
               <div className="space-y-3">
@@ -1620,6 +1647,9 @@ function TrainingLog({ session, onLogout }) {
                   >
                     <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
                       {entry.exercise}
+                      <span className="block sm:inline sm:ml-1.5 text-xs font-normal text-neutral-400">
+                        {entry.category}
+                      </span>
                     </span>
                     <input
                       type="text"
@@ -1630,7 +1660,7 @@ function TrainingLog({ session, onLogout }) {
                       aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
                       className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
-                    {activeCategory === "Sprint Interval Training" ? (
+                    {entry.category === "Sprint Interval Training" ? (
                       <>
                         <input
                           type="number"
@@ -1722,15 +1752,26 @@ function TrainingLog({ session, onLogout }) {
               {historyError} If this keeps happening, try logging out and back in.
             </p>
           ) : history.length === 0 ? (
-            <p className="text-sm text-neutral-500">Saved workout titles and times will appear here.</p>
+            <p className="text-sm text-neutral-500">Your past workout days will appear here.</p>
           ) : (
             <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
-              {history.map((w) => (
-                <li key={w.id} className="flex items-center justify-between px-4 py-3">
-                  <span className="text-sm text-neutral-800">{w.title}</span>
-                  <span className="text-xs text-neutral-400">{timeAgo(w.created_at)}</span>
-                </li>
-              ))}
+              {history.map((w) => {
+                const entries = w.entries || [];
+                const cats = [...new Set(entries.map((e) => e.category || w.category).filter(Boolean))];
+                return (
+                  <li key={w.id} className="flex items-center justify-between px-4 py-3">
+                    <span className="text-sm text-neutral-800">
+                      {cats.join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
+                      {w.status === "assigned" && (
+                        <span className="ml-2 text-xs text-amber-600 uppercase tracking-wide">Not completed</span>
+                      )}
+                    </span>
+                    <span className="text-xs text-neutral-400">
+                      {new Date(w.workout_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -1951,48 +1992,69 @@ function CoachDashboard({ session, onLogout }) {
 // ------------------------------------------------------------
 function ClientWorkspace({ client, session, onBack, onLogout }) {
   const [activeCategory, setActiveCategory] = useState(CATEGORIES[0]);
+  const [targetDate, setTargetDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
 
   const [builderOpen, setBuilderOpen] = useState(false);
   const [workoutEntries, setWorkoutEntries] = useState([]);
+  const [workoutId, setWorkoutId] = useState(null);
+  const [workoutStatus, setWorkoutStatus] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
   const [search, setSearch] = useState("");
 
-  const activeCategoryRef = useRef(activeCategory);
   useEffect(() => {
-    activeCategoryRef.current = activeCategory;
-  }, [activeCategory]);
+    loadHistory();
+  }, []);
 
+  // Re-load whichever day is selected so the coach edits that day's actual
+  // plan (assigned or already completed) instead of always starting blank.
   useEffect(() => {
-    loadHistory(activeCategory);
+    loadDay(targetDate);
+  }, [targetDate]);
+
+  async function loadDay(date) {
     setBuilderOpen(false);
     setWorkoutEntries([]);
+    setWorkoutId(null);
+    setWorkoutStatus(null);
     setSaveError("");
-  }, [activeCategory]);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&workout_date=eq.${date}&select=id,status,entries&limit=1`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      const rows = await res.json();
+      if (rows[0]) {
+        setWorkoutId(rows[0].id);
+        setWorkoutStatus(rows[0].status);
+        setWorkoutEntries((rows[0].entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
+        setBuilderOpen(true);
+      }
+    } catch {
+      // No existing plan for that day — coach just starts a fresh one.
+    }
+  }
 
-  async function loadHistory(category) {
+  async function loadHistory() {
     setHistoryLoading(true);
     setHistoryError("");
     try {
       const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&category=eq.${encodeURIComponent(
-          category
-        )}&select=id,title,created_at,assigned_by&order=created_at.desc&limit=10`,
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&select=id,workout_date,status,entries,category&order=workout_date.desc&limit=10`,
         { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
       );
-      if (category !== activeCategoryRef.current) return;
       if (!res.ok) throw new Error("Could not load this client's workout history.");
       setHistory(await res.json());
     } catch (err) {
-      if (category !== activeCategoryRef.current) return;
       setHistory([]);
       setHistoryError(err.message || "Could not load this client's workout history.");
     } finally {
-      if (category === activeCategoryRef.current) setHistoryLoading(false);
+      setHistoryLoading(false);
     }
   }
 
@@ -2003,6 +2065,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       {
         id: crypto.randomUUID(),
         exercise: name,
+        category: activeCategory,
         weight: "",
         reps: isTimeBased ? "" : "5",
         time: isTimeBased ? "20" : "",
@@ -2026,14 +2089,13 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       setSaveError("Add at least one exercise before assigning.");
       return;
     }
-    const isTimeBased = activeCategory === "Sprint Interval Training";
     for (const entry of workoutEntries) {
       const sets = Number(entry.sets);
       if (!Number.isInteger(sets) || sets <= 0) {
         setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
         return;
       }
-      if (isTimeBased) {
+      if (entry.category === "Sprint Interval Training") {
         const time = Number(entry.time);
         if (!Number.isInteger(time) || time <= 0) {
           setSaveError(`Enter a valid sprint time for ${entry.exercise}.`);
@@ -2058,29 +2120,45 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
     setSaving(true);
     setSaveError("");
     try {
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/workouts`, {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${session.access_token}`,
-          "Content-Type": "application/json",
-          Prefer: "return=representation",
-        },
-        body: JSON.stringify({
-          client_id: client.id,
-          assigned_by: session.user.id,
-          category: activeCategory,
-          title: `${activeCategory} — ${workoutEntries.length} exercise${workoutEntries.length === 1 ? "" : "s"} (assigned)`,
-          entries: workoutEntries.map(({ id, ...rest }) => rest),
-        }),
-      });
+      // Never downgrade a day the client already marked completed back to
+      // "assigned" just because a coach edited it — only set assigned when
+      // creating a new plan or editing one that's still pending.
+      const body = {
+        entries: workoutEntries.map(({ id, ...rest }) => rest),
+        status: workoutStatus === "completed" ? "completed" : "assigned",
+        assigned_by: session.user.id,
+      };
+      const res = workoutId
+        ? await fetch(`${SUPABASE_URL}/rest/v1/workouts?id=eq.${workoutId}`, {
+            method: "PATCH",
+            headers: {
+              apikey: SUPABASE_ANON_KEY,
+              Authorization: `Bearer ${session.access_token}`,
+              "Content-Type": "application/json",
+              Prefer: "return=representation",
+            },
+            body: JSON.stringify(body),
+          })
+        : await fetch(`${SUPABASE_URL}/rest/v1/workouts`, {
+            method: "POST",
+            headers: {
+              apikey: SUPABASE_ANON_KEY,
+              Authorization: `Bearer ${session.access_token}`,
+              "Content-Type": "application/json",
+              Prefer: "return=representation",
+            },
+            body: JSON.stringify({ client_id: client.id, workout_date: targetDate, ...body }),
+          });
       if (res.status === 401 || res.status === 403) {
         throw new Error("Your session may have expired. Try logging out and back in.");
       }
       if (!res.ok) throw new Error("Could not assign this workout.");
-      setWorkoutEntries([]);
-      setBuilderOpen(false);
-      loadHistory(activeCategory);
+      const rows = await res.json();
+      if (rows[0]) {
+        setWorkoutId(rows[0].id);
+        setWorkoutStatus(rows[0].status);
+      }
+      loadHistory();
     } catch (err) {
       setSaveError(err.message || "Something went wrong assigning this workout.");
     } finally {
@@ -2152,23 +2230,43 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         </div>
 
         <div className="mt-8 border border-neutral-200 bg-white p-5 sm:p-6">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-bold text-neutral-900">{activeCategory}</h2>
-            {!builderOpen && (
-              <button
-                type="button"
-                onClick={() => setBuilderOpen(true)}
-                className="flex items-center gap-1.5 text-sm font-medium bg-neutral-900 text-white px-4 py-2.5 hover:bg-neutral-800 transition-colors"
-              >
-                <Plus size={14} /> Assign workout
-              </button>
-            )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-bold text-neutral-900">Assign a workout</h2>
+              {workoutStatus && (
+                <span
+                  className={`text-xs font-medium uppercase tracking-wide ${
+                    workoutStatus === "completed" ? "text-emerald-700" : "text-amber-600"
+                  }`}
+                >
+                  {workoutStatus === "completed" ? "Completed by client" : "Assigned, not yet done"}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="date"
+                value={targetDate}
+                onChange={(e) => setTargetDate(e.target.value)}
+                aria-label="Workout date"
+                className="border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+              />
+              {!builderOpen && (
+                <button
+                  type="button"
+                  onClick={() => setBuilderOpen(true)}
+                  className="flex items-center gap-1.5 text-sm font-medium bg-neutral-900 text-white px-4 py-2.5 hover:bg-neutral-800 transition-colors"
+                >
+                  <Plus size={14} /> Assign workout
+                </button>
+              )}
+            </div>
           </div>
 
           {builderOpen && (
             <div className="mt-4">
               <p className="text-xs text-neutral-400 mb-3">
-                {client.full_name || client.email} tracks weight in {unitLabel}.
+                {client.full_name || client.email} tracks weight in {unitLabel}. Use the category tabs above to browse exercises to add.
               </p>
               <WeightConverter />
 
@@ -2185,6 +2283,9 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                     >
                       <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
                         {entry.exercise}
+                        <span className="block sm:inline sm:ml-1.5 text-xs font-normal text-neutral-400">
+                          {entry.category}
+                        </span>
                       </span>
                       <input
                         type="text"
@@ -2195,7 +2296,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                         aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
                         className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
-                      {activeCategory === "Sprint Interval Training" ? (
+                      {entry.category === "Sprint Interval Training" ? (
                         <>
                           <input
                             type="number"
@@ -2337,22 +2438,30 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                 {historyError}
               </p>
             ) : history.length === 0 ? (
-              <p className="text-sm text-neutral-500">No workouts logged in this category yet.</p>
+              <p className="text-sm text-neutral-500">No workouts logged yet.</p>
             ) : (
               <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
-                {history.map((w) => (
-                  <li key={w.id} className="flex items-center justify-between px-4 py-3">
-                    <span className="text-sm text-neutral-800">
-                      {w.title}
-                      {w.assigned_by && (
-                        <span className="ml-2 text-xs text-neutral-400 uppercase tracking-wide">
-                          Assigned
+                {history.map((w) => {
+                  const entries = w.entries || [];
+                  const cats = [...new Set(entries.map((e) => e.category || w.category).filter(Boolean))];
+                  return (
+                    <li key={w.id} className="flex items-center justify-between px-4 py-3">
+                      <span className="text-sm text-neutral-800">
+                        {cats.join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
+                        <span
+                          className={`ml-2 text-xs font-medium uppercase tracking-wide ${
+                            w.status === "completed" ? "text-emerald-700" : "text-amber-600"
+                          }`}
+                        >
+                          {w.status === "completed" ? "Completed" : "Assigned"}
                         </span>
-                      )}
-                    </span>
-                    <span className="text-xs text-neutral-400">{timeAgo(w.created_at)}</span>
-                  </li>
-                ))}
+                      </span>
+                      <span className="text-xs text-neutral-400">
+                        {new Date(w.workout_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
