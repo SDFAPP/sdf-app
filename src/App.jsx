@@ -1354,10 +1354,15 @@ function TrainingLog({ session, onLogout }) {
 
   const [builderOpen, setBuilderOpen] = useState(false);
   const [workoutEntries, setWorkoutEntries] = useState([]);
-  const [todaysWorkoutId, setTodaysWorkoutId] = useState(null);
-  const [todaysStatus, setTodaysStatus] = useState(null);
+  // Whichever day is currently open in the builder — today by default, or a
+  // past day the client clicked into from history to amend it.
+  const [openWorkoutId, setOpenWorkoutId] = useState(null);
+  const [openWorkoutStatus, setOpenWorkoutStatus] = useState(null);
+  const [openWorkoutDate, setOpenWorkoutDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [deletingId, setDeletingId] = useState(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
 
   const [search, setSearch] = useState("");
   const [viewingExercise, setViewingExercise] = useState(null);
@@ -1400,14 +1405,57 @@ function TrainingLog({ session, onLogout }) {
       if (!res.ok) return;
       const rows = await res.json();
       if (rows[0]) {
-        setTodaysWorkoutId(rows[0].id);
-        setTodaysStatus(rows[0].status);
+        setOpenWorkoutId(rows[0].id);
+        setOpenWorkoutStatus(rows[0].status);
+        setOpenWorkoutDate(today);
         setWorkoutEntries((rows[0].entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
         setBuilderOpen(true);
       }
     } catch {
       // Worst case a coach-assigned session for today just doesn't pre-load
       // — the client can still build a fresh workout from scratch.
+    }
+  }
+
+  // Open a past day from history into the builder so it can be amended —
+  // reuses the same add/update/remove/save logic as "today".
+  function openHistoryDay(w) {
+    setOpenWorkoutId(w.id);
+    setOpenWorkoutStatus(w.status);
+    setOpenWorkoutDate(w.workout_date);
+    setWorkoutEntries((w.entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
+    setSaveError("");
+    setBuilderOpen(true);
+  }
+
+  function backToToday() {
+    setBuilderOpen(false);
+    setWorkoutEntries([]);
+    setSaveError("");
+    loadToday();
+  }
+
+  async function deleteWorkoutDay(id) {
+    setDeletingId(id);
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/workouts?id=eq.${id}`, {
+        method: "DELETE",
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+      });
+      if (!res.ok) throw new Error("Could not delete this workout.");
+      setDeleteConfirmId(null);
+      if (id === openWorkoutId) {
+        setOpenWorkoutId(null);
+        setOpenWorkoutStatus(null);
+        setOpenWorkoutDate(new Date().toISOString().slice(0, 10));
+        setWorkoutEntries([]);
+        setBuilderOpen(false);
+      }
+      loadHistory();
+    } catch (err) {
+      setHistoryError(err.message || "Could not delete this workout.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -1493,8 +1541,8 @@ function TrainingLog({ session, onLogout }) {
     setSaveError("");
     try {
       const body = { entries: workoutEntries.map(({ id, ...rest }) => rest), status: "completed" };
-      const res = todaysWorkoutId
-        ? await fetch(`${SUPABASE_URL}/rest/v1/workouts?id=eq.${todaysWorkoutId}`, {
+      const res = openWorkoutId
+        ? await fetch(`${SUPABASE_URL}/rest/v1/workouts?id=eq.${openWorkoutId}`, {
             method: "PATCH",
             headers: {
               apikey: SUPABASE_ANON_KEY,
@@ -1514,7 +1562,7 @@ function TrainingLog({ session, onLogout }) {
             },
             body: JSON.stringify({
               client_id: session.user.id,
-              workout_date: new Date().toISOString().slice(0, 10),
+              workout_date: openWorkoutDate,
               ...body,
             }),
           });
@@ -1524,9 +1572,12 @@ function TrainingLog({ session, onLogout }) {
       if (!res.ok) throw new Error("Could not save workout.");
       const rows = await res.json();
       if (rows[0]) {
-        setTodaysWorkoutId(rows[0].id);
-        setTodaysStatus(rows[0].status);
+        setOpenWorkoutId(rows[0].id);
+        setOpenWorkoutStatus(rows[0].status);
       }
+      // A day other than today was just amended — refresh the history list
+      // so its summary/status reflects the change.
+      if (openWorkoutDate !== new Date().toISOString().slice(0, 10)) loadHistory();
     } catch (err) {
       setSaveError(err.message || "Something went wrong saving this workout.");
     } finally {
@@ -1621,11 +1672,24 @@ function TrainingLog({ session, onLogout }) {
         <div className="mt-6 flex items-center justify-between gap-4">
           <div>
             <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
-              {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
+              {new Date(`${openWorkoutDate}T00:00:00`).toLocaleDateString(undefined, {
+                weekday: "long",
+                month: "long",
+                day: "numeric",
+              })}
             </p>
             <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900">
-              Today's workout.
+              {openWorkoutDate === new Date().toISOString().slice(0, 10) ? "Today's workout." : "Amending this day."}
             </h2>
+            {openWorkoutDate !== new Date().toISOString().slice(0, 10) && (
+              <button
+                type="button"
+                onClick={backToToday}
+                className="mt-1 flex items-center gap-1 text-xs text-neutral-500 hover:text-neutral-900"
+              >
+                <ArrowLeft size={12} /> Back to today
+              </button>
+            )}
           </div>
           <button
             type="button"
@@ -1639,9 +1703,9 @@ function TrainingLog({ session, onLogout }) {
 
         {builderOpen && (
           <div className="mt-6 border border-neutral-200 bg-white p-5">
-            {todaysStatus === "assigned" && (
+            {openWorkoutStatus === "assigned" && (
               <p className="mb-4 border border-amber-200 bg-amber-50 text-amber-800 text-sm px-3 py-2.5">
-                Your coach assigned this workout for today. Adjust anything you need, then save when you're done.
+                Your coach assigned this workout. Adjust anything you need, then save when you're done.
               </p>
             )}
             {workoutEntries.length === 0 ? (
@@ -1752,9 +1816,12 @@ function TrainingLog({ session, onLogout }) {
         <div className="mt-10 border-b border-neutral-300" />
 
         <div className="mt-6">
-          <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+          <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
             Exercise history details
           </p>
+          {history.length > 0 && !historyLoading && (
+            <p className="text-xs text-neutral-400 mb-2">Tap a day to amend it, or use the bin icon to delete it.</p>
+          )}
           {historyLoading ? (
             <p className="text-sm text-neutral-400">Loading…</p>
           ) : historyError ? (
@@ -1769,16 +1836,50 @@ function TrainingLog({ session, onLogout }) {
                 const entries = w.entries || [];
                 const cats = [...new Set(entries.map((e) => e.category || w.category).filter(Boolean))];
                 return (
-                  <li key={w.id} className="flex items-center justify-between px-4 py-3">
-                    <span className="text-sm text-neutral-800">
+                  <li key={w.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => openHistoryDay(w)}
+                      className="flex-1 text-left text-sm text-neutral-800 hover:text-neutral-600"
+                    >
                       {cats.map(abbreviateCategory).join(", ") || "Workout"} — {entries.length} exercise{entries.length === 1 ? "" : "s"}
                       {w.status === "assigned" && (
                         <span className="ml-2 text-xs text-amber-600 uppercase tracking-wide">Not completed</span>
                       )}
-                    </span>
-                    <span className="text-xs text-neutral-400">
-                      {new Date(w.workout_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                    </span>
+                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-neutral-400">
+                        {new Date(w.workout_date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </span>
+                      {deleteConfirmId === w.id ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => deleteWorkoutDay(w.id)}
+                            disabled={deletingId === w.id}
+                            className="text-xs font-medium text-red-600 hover:text-red-700 disabled:opacity-60"
+                          >
+                            {deletingId === w.id ? "Deleting…" : "Confirm"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteConfirmId(null)}
+                            className="text-xs text-neutral-400 hover:text-neutral-700"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setDeleteConfirmId(w.id)}
+                          aria-label="Delete this workout day"
+                          className="text-neutral-300 hover:text-red-600 p-1"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      )}
+                    </div>
                   </li>
                 );
               })}
