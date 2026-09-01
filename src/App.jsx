@@ -1735,7 +1735,7 @@ function TrainingLog({ session, onLogout }) {
                       className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                     />
                     {entry.category === "Sprint Interval Training" ? (
-                      <>
+                      <span className="flex items-center gap-1.5 shrink-0">
                         <input
                           type="number"
                           inputMode="numeric"
@@ -1746,9 +1746,9 @@ function TrainingLog({ session, onLogout }) {
                           className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                         />
                         <span className="text-xs text-neutral-400">sec sprint</span>
-                      </>
+                      </span>
                     ) : (
-                      <>
+                      <span className="flex items-center gap-1.5 shrink-0">
                         <input
                           type="number"
                           inputMode="numeric"
@@ -1759,29 +1759,33 @@ function TrainingLog({ session, onLogout }) {
                           className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                         />
                         <span className="text-xs text-neutral-400">reps</span>
-                      </>
+                      </span>
                     )}
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      step="0.5"
-                      value={entry.rest}
-                      onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
-                      placeholder="Rest"
-                      aria-label={`Rest in minutes for ${entry.exercise}`}
-                      className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                    />
-                    <span className="text-xs text-neutral-400">min rest</span>
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      value={entry.sets}
-                      onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
-                      placeholder="Sets"
-                      aria-label={`Sets for ${entry.exercise}`}
-                      className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                    />
-                    <span className="text-xs text-neutral-400">sets</span>
+                    <span className="flex items-center gap-1.5 shrink-0">
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        step="0.5"
+                        value={entry.rest}
+                        onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
+                        placeholder="Rest"
+                        aria-label={`Rest in minutes for ${entry.exercise}`}
+                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      />
+                      <span className="text-xs text-neutral-400">min rest</span>
+                    </span>
+                    <span className="flex items-center gap-1.5 shrink-0">
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        value={entry.sets}
+                        onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
+                        placeholder="Sets"
+                        aria-label={`Sets for ${entry.exercise}`}
+                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                      />
+                      <span className="text-xs text-neutral-400">sets</span>
+                    </span>
                     <button
                       type="button"
                       onClick={() => removeEntry(entry.id)}
@@ -2408,7 +2412,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                         className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                       />
                       {entry.category === "Sprint Interval Training" ? (
-                        <>
+                        <span className="flex items-center gap-1.5 shrink-0">
                           <input
                             type="number"
                             inputMode="numeric"
@@ -2419,9 +2423,9 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                             className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                           />
                           <span className="text-xs text-neutral-400">sec sprint</span>
-                        </>
+                        </span>
                       ) : (
-                        <>
+                        <span className="flex items-center gap-1.5 shrink-0">
                           <input
                             type="number"
                             inputMode="numeric"
@@ -2432,29 +2436,33 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                             className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
                           />
                           <span className="text-xs text-neutral-400">reps</span>
-                        </>
+                        </span>
                       )}
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.5"
-                        value={entry.rest}
-                        onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
-                        placeholder="Rest"
-                        aria-label={`Rest in minutes for ${entry.exercise}`}
-                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                      />
-                      <span className="text-xs text-neutral-400">min rest</span>
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        value={entry.sets}
-                        onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
-                        placeholder="Sets"
-                        aria-label={`Sets for ${entry.exercise}`}
-                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                      />
-                      <span className="text-xs text-neutral-400">sets</span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          step="0.5"
+                          value={entry.rest}
+                          onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
+                          placeholder="Rest"
+                          aria-label={`Rest in minutes for ${entry.exercise}`}
+                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                        />
+                        <span className="text-xs text-neutral-400">min rest</span>
+                      </span>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          value={entry.sets}
+                          onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
+                          placeholder="Sets"
+                          aria-label={`Sets for ${entry.exercise}`}
+                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                        />
+                        <span className="text-xs text-neutral-400">sets</span>
+                      </span>
                       <button
                         type="button"
                         onClick={() => removeEntry(entry.id)}
