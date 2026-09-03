@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, UserPlus, ClipboardList, ArrowUpRight, Clock, XCircle,
-  Play, Search, X, Plus, Trash2, LogOut, ArrowLeft, Users, ShieldCheck,
+  Play, Search, X, Plus, Trash2, LogOut, ArrowLeft, Users, ShieldCheck, Check,
 } from "lucide-react";
 
 // --- Supabase config ---------------------------------------------------
@@ -728,6 +728,253 @@ function abbreviateCategory(cat) {
   return CATEGORY_ABBREVIATIONS[cat] || cat;
 }
 
+// ------------------------------------------------------------
+// Per-set logging: each exercise in a workout holds an array of
+// individual sets (own weight/reps/RPE/tag/completion), matching how
+// people actually train — set 3 might be lighter than set 1, or the
+// last one taken to failure.
+// ------------------------------------------------------------
+const SET_TYPES = [
+  { value: "normal", label: "Normal" },
+  { value: "warmup", label: "Warm-up" },
+  { value: "drop", label: "Drop set" },
+  { value: "failure", label: "Failure" },
+];
+const SET_TYPE_STYLES = {
+  normal: "border-neutral-300 text-neutral-700 bg-white",
+  warmup: "border-amber-300 text-amber-700 bg-amber-50",
+  drop: "border-purple-300 text-purple-700 bg-purple-50",
+  failure: "border-red-300 text-red-700 bg-red-50",
+};
+
+function newSet(prevSet) {
+  return {
+    id: crypto.randomUUID(),
+    weight: prevSet?.weight ?? "",
+    reps: prevSet?.reps ?? "",
+    time: prevSet?.time ?? "",
+    rpe: "",
+    type: "normal",
+    completed: false,
+    completedAt: null,
+  };
+}
+
+// Old saved workouts (before per-set logging) stored one row per exercise
+// as {weight, reps, time, rest, sets: "3"} — a single prescription, not
+// individual sets. Expand that into N identical set rows so old data still
+// displays and edits correctly; new saves always use the array shape.
+function hydrateExerciseEntry(entry) {
+  if (Array.isArray(entry.sets)) {
+    return {
+      id: crypto.randomUUID(),
+      exercise: entry.exercise,
+      category: entry.category,
+      restMinutes: String(entry.restMinutes ?? entry.rest ?? "1"),
+      sets: entry.sets.map((s) => ({
+        id: crypto.randomUUID(),
+        weight: s.weight ?? "",
+        reps: s.reps ?? "",
+        time: s.time ?? "",
+        rpe: s.rpe ?? "",
+        type: s.type || "normal",
+        completed: !!s.completed,
+        completedAt: s.completedAt || null,
+      })),
+    };
+  }
+  const count = Math.max(1, parseInt(entry.sets, 10) || 1);
+  return {
+    id: crypto.randomUUID(),
+    exercise: entry.exercise,
+    category: entry.category,
+    restMinutes: String(entry.rest ?? "1"),
+    sets: Array.from({ length: count }, () => ({
+      id: crypto.randomUUID(),
+      weight: entry.weight ?? "",
+      reps: entry.reps ?? "",
+      time: entry.time ?? "",
+      rpe: "",
+      type: "normal",
+      completed: true,
+      completedAt: null,
+    })),
+  };
+}
+
+function formatRestClock(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, "0")}`;
+}
+
+function requestRestNotificationPermission() {
+  try {
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+  } catch {
+    // Notifications just won't fire — the on-screen timer still works.
+  }
+}
+
+function notifyRestDone() {
+  try {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      new Notification("Rest complete", { body: "Time for your next set." });
+    }
+  } catch {
+    // Ignore — visual timer already shows 0:00.
+  }
+  try {
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+  } catch {
+    // Vibration API isn't available on this device — fine.
+  }
+}
+
+function playRestBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.6);
+  } catch {
+    // No Web Audio support — silent fallback, timer is still visible.
+  }
+}
+
+const REST_TIMER_STORAGE_KEY = "sdf_rest_timer";
+
+// A rest timer keyed to an absolute end timestamp (not a decrementing
+// counter) so it stays correct across a backgrounded tab or a page reload
+// mid-rest — restored from localStorage on mount.
+function useRestTimer() {
+  const [restEndsAt, setRestEndsAt] = useState(null);
+  const [restDurationSec, setRestDurationSec] = useState(0);
+  const [restLabel, setRestLabel] = useState("");
+  const [restRemaining, setRestRemaining] = useState(0);
+  const [restPaused, setRestPaused] = useState(false);
+  const [restPausedRemaining, setRestPausedRemaining] = useState(0);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(REST_TIMER_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved.paused) {
+        setRestPaused(true);
+        setRestPausedRemaining(saved.remaining);
+        setRestDurationSec(saved.duration);
+        setRestLabel(saved.label || "");
+      } else if (saved.endsAt && saved.endsAt > Date.now()) {
+        setRestEndsAt(saved.endsAt);
+        setRestDurationSec(saved.duration);
+        setRestLabel(saved.label || "");
+      } else {
+        localStorage.removeItem(REST_TIMER_STORAGE_KEY);
+      }
+    } catch {
+      // No stored timer, or it's corrupt — just start fresh.
+    }
+  }, []);
+
+  function persist(state) {
+    try {
+      if (!state) localStorage.removeItem(REST_TIMER_STORAGE_KEY);
+      else localStorage.setItem(REST_TIMER_STORAGE_KEY, JSON.stringify(state));
+    } catch {
+      // Best-effort only — the in-memory timer still works this session.
+    }
+  }
+
+  useEffect(() => {
+    if (!restEndsAt || restPaused) return;
+    const tick = () => {
+      const remaining = Math.max(0, Math.round((restEndsAt - Date.now()) / 1000));
+      setRestRemaining(remaining);
+      if (remaining <= 0) {
+        setRestEndsAt(null);
+        persist(null);
+        playRestBeep();
+        notifyRestDone();
+      }
+    };
+    tick();
+    const id = setInterval(tick, 250);
+    return () => clearInterval(id);
+  }, [restEndsAt, restPaused]);
+
+  function startRestTimer(seconds, label) {
+    if (!seconds || seconds <= 0) return;
+    const endsAt = Date.now() + seconds * 1000;
+    setRestEndsAt(endsAt);
+    setRestDurationSec(seconds);
+    setRestLabel(label || "");
+    setRestPaused(false);
+    setRestRemaining(seconds);
+    persist({ endsAt, duration: seconds, label: label || "", paused: false });
+    requestRestNotificationPermission();
+  }
+
+  function adjustRestTimer(deltaSec) {
+    if (restPaused) {
+      const next = Math.max(0, restPausedRemaining + deltaSec);
+      setRestPausedRemaining(next);
+      persist({ paused: true, remaining: next, duration: restDurationSec, label: restLabel });
+      return;
+    }
+    if (!restEndsAt) return;
+    const nextEndsAt = Math.max(Date.now(), restEndsAt + deltaSec * 1000);
+    setRestEndsAt(nextEndsAt);
+    persist({ endsAt: nextEndsAt, duration: restDurationSec, label: restLabel, paused: false });
+  }
+
+  function pauseResumeRestTimer() {
+    if (restPaused) {
+      const endsAt = Date.now() + restPausedRemaining * 1000;
+      setRestEndsAt(endsAt);
+      setRestPaused(false);
+      persist({ endsAt, duration: restDurationSec, label: restLabel, paused: false });
+    } else {
+      if (!restEndsAt) return;
+      const remaining = Math.max(0, Math.round((restEndsAt - Date.now()) / 1000));
+      setRestPausedRemaining(remaining);
+      setRestPaused(true);
+      setRestEndsAt(null);
+      persist({ paused: true, remaining, duration: restDurationSec, label: restLabel });
+    }
+  }
+
+  function skipRestTimer() {
+    setRestEndsAt(null);
+    setRestPaused(false);
+    setRestRemaining(0);
+    persist(null);
+  }
+
+  return {
+    restActive: !!restEndsAt || restPaused,
+    restRemaining: restPaused ? restPausedRemaining : restRemaining,
+    restLabel,
+    restPaused,
+    startRestTimer,
+    adjustRestTimer,
+    pauseResumeRestTimer,
+    skipRestTimer,
+  };
+}
+
 const EXERCISE_LIBRARY = [
   "Ab Crunch Machine", "Arnold Press", "Assault Bike Sprint", "Assisted Dip", "Assisted Pull-Up",
   "Back Extension", "Back Squat", "Band Pull-Apart", "Barbell Curl", "Barbell Row",
@@ -1370,6 +1617,11 @@ function TrainingLog({ session, onLogout }) {
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
 
+  const {
+    restActive, restRemaining, restLabel, restPaused,
+    startRestTimer, adjustRestTimer, pauseResumeRestTimer, skipRestTimer,
+  } = useRestTimer();
+
   useEffect(() => {
     (async () => {
       try {
@@ -1408,7 +1660,7 @@ function TrainingLog({ session, onLogout }) {
         setOpenWorkoutId(rows[0].id);
         setOpenWorkoutStatus(rows[0].status);
         setOpenWorkoutDate(today);
-        setWorkoutEntries((rows[0].entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
+        setWorkoutEntries((rows[0].entries || []).map(hydrateExerciseEntry));
         setBuilderOpen(true);
       }
     } catch {
@@ -1423,7 +1675,7 @@ function TrainingLog({ session, onLogout }) {
     setOpenWorkoutId(w.id);
     setOpenWorkoutStatus(w.status);
     setOpenWorkoutDate(w.workout_date);
-    setWorkoutEntries((w.entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
+    setWorkoutEntries((w.entries || []).map(hydrateExerciseEntry));
     setSaveError("");
     setBuilderOpen(true);
   }
@@ -1486,22 +1738,77 @@ function TrainingLog({ session, onLogout }) {
         id: crypto.randomUUID(),
         exercise: name,
         category: activeCategory,
-        weight: "",
-        reps: isTimeBased ? "" : "5",
-        time: isTimeBased ? "20" : "",
-        rest: isTimeBased ? "3" : "1",
-        sets: isTimeBased ? "6" : "3",
+        restMinutes: isTimeBased ? "3" : "1",
+        sets: [
+          {
+            id: crypto.randomUUID(),
+            weight: "",
+            reps: isTimeBased ? "" : "5",
+            time: isTimeBased ? "20" : "",
+            rpe: "",
+            type: "normal",
+            completed: false,
+            completedAt: null,
+          },
+        ],
       },
     ]);
     setBuilderOpen(true);
   }
 
-  function updateEntry(id, field, value) {
-    setWorkoutEntries((prev) => prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)));
+  function addSet(groupId) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) => (g.id !== groupId ? g : { ...g, sets: [...g.sets, newSet(g.sets[g.sets.length - 1])] }))
+    );
   }
 
-  function removeEntry(id) {
-    setWorkoutEntries((prev) => prev.filter((e) => e.id !== id));
+  function updateGroupField(groupId, field, value) {
+    setWorkoutEntries((prev) => prev.map((g) => (g.id === groupId ? { ...g, [field]: value } : g)));
+  }
+
+  function updateSet(groupId, setId, field, value) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) =>
+        g.id !== groupId ? g : { ...g, sets: g.sets.map((s) => (s.id === setId ? { ...s, [field]: value } : s)) }
+      )
+    );
+  }
+
+  function removeSet(groupId, setId) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) => (g.id !== groupId ? g : { ...g, sets: g.sets.filter((s) => s.id !== setId) }))
+    );
+  }
+
+  function removeExerciseGroup(groupId) {
+    setWorkoutEntries((prev) => prev.filter((g) => g.id !== groupId));
+  }
+
+  // Checking a set complete starts the rest timer for that exercise's
+  // configured rest — unchecking it just clears the completion state.
+  function toggleSetComplete(groupId, setId) {
+    const group = workoutEntries.find((g) => g.id === groupId);
+    const set = group?.sets.find((s) => s.id === setId);
+    if (!group || !set) return;
+    const nowCompleted = !set.completed;
+    setWorkoutEntries((prev) =>
+      prev.map((g) =>
+        g.id !== groupId
+          ? g
+          : {
+              ...g,
+              sets: g.sets.map((s) =>
+                s.id !== setId
+                  ? s
+                  : { ...s, completed: nowCompleted, completedAt: nowCompleted ? new Date().toISOString() : null }
+              ),
+            }
+      )
+    );
+    if (nowCompleted) {
+      const restSeconds = Math.round((Number(group.restMinutes) || 0) * 60);
+      if (restSeconds > 0) startRestTimer(restSeconds, group.exercise);
+    }
   }
 
   async function saveWorkout() {
@@ -1509,38 +1816,53 @@ function TrainingLog({ session, onLogout }) {
       setSaveError("Add at least one exercise before saving.");
       return;
     }
-    for (const entry of workoutEntries) {
-      const sets = Number(entry.sets);
-      if (!Number.isInteger(sets) || sets <= 0) {
-        setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
+    for (const group of workoutEntries) {
+      if (group.sets.length === 0) {
+        setSaveError(`Add at least one set for ${group.exercise}, or remove it.`);
         return;
       }
-      if (entry.category === "Sprint Interval Training") {
-        const time = Number(entry.time);
-        if (!Number.isInteger(time) || time <= 0) {
-          setSaveError(`Enter a valid sprint time for ${entry.exercise}.`);
+      if (group.restMinutes.trim() !== "" && !(Number(group.restMinutes) >= 0)) {
+        setSaveError(`Enter a valid rest time for ${group.exercise}, or leave it blank.`);
+        return;
+      }
+      for (const s of group.sets) {
+        if (group.category === "Sprint Interval Training") {
+          const time = Number(s.time);
+          if (!Number.isInteger(time) || time <= 0) {
+            setSaveError(`Enter a valid sprint time for every set of ${group.exercise}.`);
+            return;
+          }
+        } else {
+          const reps = Number(s.reps);
+          const allowZero = s.type === "failure";
+          if (!Number.isInteger(reps) || (allowZero ? reps < 0 : reps <= 0)) {
+            setSaveError(`Enter a valid number of reps for every set of ${group.exercise}.`);
+            return;
+          }
+        }
+        if (s.weight.trim() !== "" && !(Number(s.weight) >= 0)) {
+          setSaveError(`Enter a valid weight for ${group.exercise}, or leave it blank.`);
           return;
         }
-      } else {
-        const reps = Number(entry.reps);
-        if (!Number.isInteger(reps) || reps <= 0) {
-          setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
-          return;
+        if (s.rpe.trim() !== "") {
+          const rpeNum = Number(s.rpe);
+          if (!(rpeNum >= 6 && rpeNum <= 10) || Math.round(rpeNum * 2) !== rpeNum * 2) {
+            setSaveError(`RPE must be between 6 and 10 in 0.5 steps for ${group.exercise}, or left blank.`);
+            return;
+          }
         }
-      }
-      if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
-        setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
-        return;
-      }
-      if (entry.rest.trim() !== "" && !(Number(entry.rest) >= 0)) {
-        setSaveError(`Enter a valid rest time for ${entry.exercise}, or leave it blank.`);
-        return;
       }
     }
     setSaving(true);
     setSaveError("");
     try {
-      const body = { entries: workoutEntries.map(({ id, ...rest }) => rest), status: "completed" };
+      const body = {
+        entries: workoutEntries.map(({ id, sets, ...rest }) => ({
+          ...rest,
+          sets: sets.map(({ id, ...s }) => s),
+        })),
+        status: "completed",
+      };
       const res = openWorkoutId
         ? await fetch(`${SUPABASE_URL}/rest/v1/workouts?id=eq.${openWorkoutId}`, {
             method: "PATCH",
@@ -1701,6 +2023,31 @@ function TrainingLog({ session, onLogout }) {
           </button>
         </div>
 
+        {restActive && (
+          <div className="sticky top-2 z-10 mt-6 bg-neutral-900 text-white px-4 py-3 flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[10px] uppercase tracking-[0.15em] text-neutral-400">
+                Rest{restLabel ? ` — ${restLabel}` : ""}
+              </p>
+              <p className="text-2xl font-black tabular-nums leading-tight">{formatRestClock(restRemaining)}</p>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button type="button" onClick={() => adjustRestTimer(-15)} className="text-xs px-2.5 py-2 border border-neutral-600 hover:border-neutral-400">
+                -15
+              </button>
+              <button type="button" onClick={() => adjustRestTimer(15)} className="text-xs px-2.5 py-2 border border-neutral-600 hover:border-neutral-400">
+                +15
+              </button>
+              <button type="button" onClick={pauseResumeRestTimer} className="text-xs px-2.5 py-2 border border-neutral-600 hover:border-neutral-400">
+                {restPaused ? "Resume" : "Pause"}
+              </button>
+              <button type="button" onClick={skipRestTimer} className="text-xs px-2.5 py-2 border border-neutral-600 hover:border-neutral-400">
+                Skip
+              </button>
+            </div>
+          </div>
+        )}
+
         {builderOpen && (
           <div className="mt-6 border border-neutral-200 bg-white p-5">
             {openWorkoutStatus === "assigned" && (
@@ -1713,89 +2060,140 @@ function TrainingLog({ session, onLogout }) {
                 Search the exercise library below (use the category tabs above to browse) and click an exercise to add it here.
               </p>
             ) : (
-              <div className="space-y-3">
-                {workoutEntries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex flex-wrap items-center gap-2 sm:gap-3 border-b border-neutral-100 pb-3 last:border-0 last:pb-0"
-                  >
-                    <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
-                      {entry.exercise}
-                      <span className="block sm:inline sm:ml-1.5 text-xs font-normal text-neutral-400">
-                        {abbreviateCategory(entry.category)}
-                      </span>
-                    </span>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={entry.weight}
-                      onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
-                      placeholder={`Weight (${unitLabel})`}
-                      aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
-                      className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                    />
-                    {entry.category === "Sprint Interval Training" ? (
-                      <span className="flex items-center gap-1.5 shrink-0">
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          value={entry.time}
-                          onChange={(e) => updateEntry(entry.id, "time", e.target.value)}
-                          placeholder="Time"
-                          aria-label={`Sprint time in seconds for ${entry.exercise}`}
-                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                        />
-                        <span className="text-xs text-neutral-400">sec sprint</span>
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1.5 shrink-0">
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          value={entry.reps}
-                          onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
-                          placeholder="Reps"
-                          aria-label={`Reps for ${entry.exercise}`}
-                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                        />
-                        <span className="text-xs text-neutral-400">reps</span>
-                      </span>
-                    )}
-                    <span className="flex items-center gap-1.5 shrink-0">
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.5"
-                        value={entry.rest}
-                        onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
-                        placeholder="Rest"
-                        aria-label={`Rest in minutes for ${entry.exercise}`}
-                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                      />
-                      <span className="text-xs text-neutral-400">min rest</span>
-                    </span>
-                    <span className="flex items-center gap-1.5 shrink-0">
-                      <input
-                        type="number"
-                        inputMode="numeric"
-                        value={entry.sets}
-                        onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
-                        placeholder="Sets"
-                        aria-label={`Sets for ${entry.exercise}`}
-                        className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                      />
-                      <span className="text-xs text-neutral-400">sets</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => removeEntry(entry.id)}
-                      className="ml-auto text-neutral-400 hover:text-red-600 p-1"
-                      aria-label="Remove exercise"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                ))}
+              <div className="space-y-6">
+                {workoutEntries.map((group) => {
+                  const isTimeBased = group.category === "Sprint Interval Training";
+                  return (
+                    <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
+                      <div className="flex items-center justify-between gap-3 mb-3">
+                        <div>
+                          <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
+                          <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
+                        </div>
+                        <div className="flex items-center gap-3 shrink-0">
+                          <span className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              step="0.5"
+                              value={group.restMinutes}
+                              onChange={(e) => updateGroupField(group.id, "restMinutes", e.target.value)}
+                              aria-label={`Rest in minutes for ${group.exercise}`}
+                              className="w-14 border border-neutral-300 px-2 py-1.5 text-sm"
+                            />
+                            <span className="text-xs text-neutral-400">min rest</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removeExerciseGroup(group.id)}
+                            aria-label={`Remove ${group.exercise}`}
+                            className="text-neutral-400 hover:text-red-600 p-1"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        {group.sets.map((s, i) => (
+                          <div
+                            key={s.id}
+                            className={`flex flex-wrap items-center gap-2 p-2 border ${
+                              s.completed ? "bg-emerald-50 border-emerald-200" : "border-neutral-200"
+                            }`}
+                          >
+                            <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
+                            <select
+                              value={s.type}
+                              onChange={(e) => updateSet(group.id, s.id, "type", e.target.value)}
+                              aria-label={`Set type for set ${i + 1} of ${group.exercise}`}
+                              className={`text-xs border px-1.5 py-2 sm:py-1.5 shrink-0 ${SET_TYPE_STYLES[s.type]}`}
+                            >
+                              {SET_TYPES.map((t) => (
+                                <option key={t.value} value={t.value}>{t.label}</option>
+                              ))}
+                            </select>
+                            <input
+                              type="text"
+                              inputMode="decimal"
+                              value={s.weight}
+                              onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
+                              placeholder={`Weight (${unitLabel})`}
+                              aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
+                              className="w-20 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                            />
+                            {isTimeBased ? (
+                              <input
+                                type="number"
+                                inputMode="numeric"
+                                value={s.time}
+                                onChange={(e) => updateSet(group.id, s.id, "time", e.target.value)}
+                                placeholder="Sec"
+                                aria-label={`Sprint time for set ${i + 1} of ${group.exercise}`}
+                                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                              />
+                            ) : (
+                              <input
+                                type="number"
+                                inputMode="numeric"
+                                value={s.reps}
+                                onChange={(e) => updateSet(group.id, s.id, "reps", e.target.value)}
+                                placeholder="Reps"
+                                aria-label={`Reps for set ${i + 1} of ${group.exercise}`}
+                                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                              />
+                            )}
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              step="0.5"
+                              min="6"
+                              max="10"
+                              value={s.rpe}
+                              onChange={(e) => updateSet(group.id, s.id, "rpe", e.target.value)}
+                              placeholder="RPE"
+                              aria-label={`RPE for set ${i + 1} of ${group.exercise}`}
+                              className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => toggleSetComplete(group.id, s.id)}
+                              aria-pressed={s.completed}
+                              aria-label={
+                                s.completed
+                                  ? `Mark set ${i + 1} of ${group.exercise} incomplete`
+                                  : `Mark set ${i + 1} of ${group.exercise} complete`
+                              }
+                              className={`ml-auto shrink-0 w-9 h-9 flex items-center justify-center border ${
+                                s.completed
+                                  ? "bg-emerald-600 border-emerald-600 text-white"
+                                  : "border-neutral-300 text-neutral-300 hover:border-neutral-500"
+                              }`}
+                            >
+                              <Check size={16} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeSet(group.id, s.id)}
+                              aria-label={`Remove set ${i + 1} of ${group.exercise}`}
+                              className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => addSet(group.id)}
+                        className="mt-2 flex items-center gap-1 text-xs font-medium text-neutral-600 hover:text-neutral-900"
+                      >
+                        <Plus size={12} /> Add set
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -1811,7 +2209,9 @@ function TrainingLog({ session, onLogout }) {
                 {saving ? "Saving…" : "Save workout"}
               </button>
               <span className="text-xs text-neutral-400">
-                {workoutEntries.length} exercise{workoutEntries.length === 1 ? "" : "s"} added
+                {workoutEntries.length} exercise{workoutEntries.length === 1 ? "" : "s"},{" "}
+                {workoutEntries.reduce((n, g) => n + g.sets.filter((s) => s.completed).length, 0)}/
+                {workoutEntries.reduce((n, g) => n + g.sets.length, 0)} sets done
               </span>
             </div>
           </div>
