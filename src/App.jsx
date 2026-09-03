@@ -1104,6 +1104,63 @@ function useRoutines(session) {
   return { routines, routinesLoading, saveAsRoutine, deleteRoutine };
 }
 
+// Body-measurement history (weight, body fat %, waist) — separate from the
+// single current-value fields on profiles, so both a client and their coach
+// can see the trend over time, not just the latest snapshot. `clientId` is
+// the client whose history this is; the signed-in user (client or coach)
+// is recorded as who logged each entry.
+function useMeasurements(session, clientId) {
+  const [measurements, setMeasurements] = useState([]);
+  const [measurementsLoading, setMeasurementsLoading] = useState(false);
+
+  useEffect(() => {
+    loadMeasurements();
+  }, [clientId]);
+
+  async function loadMeasurements() {
+    setMeasurementsLoading(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/measurements?client_id=eq.${clientId}&select=id,recorded_at,weight_kg,body_fat_pct,waist_cm,notes&order=recorded_at.desc&limit=60`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      setMeasurements(await res.json());
+    } catch {
+      // Measurements list just stays empty/stale — not worth surfacing an
+      // error for what's a supplementary feature, not the workout log.
+    } finally {
+      setMeasurementsLoading(false);
+    }
+  }
+
+  async function addMeasurement(entry) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/measurements`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ client_id: clientId, recorded_by: session.user.id, ...entry }),
+    });
+    if (!res.ok) throw new Error("Could not log this measurement.");
+    await loadMeasurements();
+  }
+
+  async function deleteMeasurement(id) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/measurements?id=eq.${id}`, {
+      method: "DELETE",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) throw new Error("Could not delete this measurement.");
+    setMeasurements((prev) => prev.filter((m) => m.id !== id));
+  }
+
+  return { measurements, measurementsLoading, addMeasurement, deleteMeasurement };
+}
+
 const EXERCISE_LIBRARY = [
   "Ab Crunch Machine", "Arnold Press", "Assault Bike Sprint", "Assisted Dip", "Assisted Pull-Up",
   "Back Extension", "Back Squat", "Band Pull-Apart", "Barbell Curl", "Barbell Row",
@@ -1520,6 +1577,168 @@ function WeightConverter() {
   );
 }
 
+// Body-measurement history: a compact log form plus the trend list, shown
+// on both the client's own TrainingLog and the coach's ClientWorkspace.
+// Weight/waist are stored in true kg/cm (matching profiles.weight_kg /
+// height_cm) and converted for display via kgToDisplay/displayToKg, same
+// convention as ProfileModal — unlike a workout set's weight field, which
+// is stored exactly as typed.
+function MeasurementsSection({ measurements, measurementsLoading, addMeasurement, deleteMeasurement, measurementSystem }) {
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [weight, setWeight] = useState("");
+  const [bodyFat, setBodyFat] = useState("");
+  const [waist, setWaist] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const weightUnit = measurementSystem === "imperial" ? "lbs" : "kg";
+  const lengthUnit = measurementSystem === "imperial" ? "in" : "cm";
+
+  async function handleSubmit() {
+    if (!weight.trim() && !bodyFat.trim() && !waist.trim()) {
+      setError("Enter at least a weight, body fat %, or waist measurement.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await addMeasurement({
+        recorded_at: date,
+        weight_kg: weight.trim() ? displayToKg(weight, measurementSystem) : null,
+        body_fat_pct: bodyFat.trim() ? Number(bodyFat) : null,
+        waist_cm: waist.trim() ? displayToCm(waist, measurementSystem) : null,
+        notes: notes.trim() || null,
+      });
+      setWeight("");
+      setBodyFat("");
+      setWaist("");
+      setNotes("");
+    } catch (err) {
+      setError(err.message || "Could not log this measurement.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Entries arrive newest-first — pair each with the delta against the
+  // next-oldest entry that actually has a weight, so gaps don't break it.
+  const withDeltas = measurements.map((m, i) => {
+    const prevWithWeight = measurements.slice(i + 1).find((p) => p.weight_kg != null);
+    const delta = m.weight_kg != null && prevWithWeight ? m.weight_kg - prevWithWeight.weight_kg : null;
+    return { ...m, delta };
+  });
+
+  return (
+    <div className="mt-6">
+      <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+        Measurements
+      </p>
+      <div className="border border-neutral-200 bg-white p-4 mb-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <span className="flex flex-col">
+            <label htmlFor="meas-date" className="text-xs text-neutral-500 mb-1">Date</label>
+            <input
+              id="meas-date" type="date" value={date} onChange={(e) => setDate(e.target.value)}
+              className="border border-neutral-300 px-2 py-2 text-sm w-36"
+            />
+          </span>
+          <span className="flex flex-col">
+            <label htmlFor="meas-weight" className="text-xs text-neutral-500 mb-1">Weight ({weightUnit})</label>
+            <input
+              id="meas-weight" type="text" inputMode="decimal" value={weight}
+              onChange={(e) => setWeight(e.target.value)}
+              className="border border-neutral-300 px-2 py-2 text-sm w-24"
+            />
+          </span>
+          <span className="flex flex-col">
+            <label htmlFor="meas-bf" className="text-xs text-neutral-500 mb-1">Body fat %</label>
+            <input
+              id="meas-bf" type="text" inputMode="decimal" value={bodyFat}
+              onChange={(e) => setBodyFat(e.target.value)}
+              className="border border-neutral-300 px-2 py-2 text-sm w-20"
+            />
+          </span>
+          <span className="flex flex-col">
+            <label htmlFor="meas-waist" className="text-xs text-neutral-500 mb-1">Waist ({lengthUnit})</label>
+            <input
+              id="meas-waist" type="text" inputMode="decimal" value={waist}
+              onChange={(e) => setWaist(e.target.value)}
+              className="border border-neutral-300 px-2 py-2 text-sm w-20"
+            />
+          </span>
+          <span className="flex-1 min-w-[140px] flex flex-col">
+            <label htmlFor="meas-notes" className="text-xs text-neutral-500 mb-1">Notes</label>
+            <input
+              id="meas-notes" type="text" value={notes} onChange={(e) => setNotes(e.target.value)}
+              className="border border-neutral-300 px-2 py-2 text-sm w-full"
+            />
+          </span>
+          <button
+            type="button"
+            disabled={saving}
+            onClick={handleSubmit}
+            className="bg-neutral-900 text-white text-sm font-medium px-4 py-2 hover:bg-neutral-800 transition-colors disabled:opacity-50"
+          >
+            {saving ? "Logging…" : "Log"}
+          </button>
+        </div>
+        {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+      </div>
+
+      {measurementsLoading ? (
+        <p className="text-sm text-neutral-400">Loading…</p>
+      ) : measurements.length === 0 ? (
+        <p className="text-sm text-neutral-500">No measurements logged yet.</p>
+      ) : (
+        <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
+          {withDeltas.map((m) => (
+            <li key={m.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <span className="text-sm text-neutral-800">
+                {m.weight_kg != null && (
+                  <>
+                    {kgToDisplay(m.weight_kg, measurementSystem)}{weightUnit}
+                    {m.delta != null && Math.round(m.delta * 10) !== 0 && (
+                      <span
+                        className={`ml-1 text-xs ${
+                          m.delta < 0 ? "text-emerald-700" : "text-amber-600"
+                        }`}
+                      >
+                        ({m.delta > 0 ? "+" : ""}
+                        {kgToDisplay(m.delta, measurementSystem)}{weightUnit})
+                      </span>
+                    )}
+                  </>
+                )}
+                {m.body_fat_pct != null && <span className="ml-2 text-xs text-neutral-500">{m.body_fat_pct}% BF</span>}
+                {m.waist_cm != null && (
+                  <span className="ml-2 text-xs text-neutral-500">
+                    {cmToDisplay(m.waist_cm, measurementSystem)}{lengthUnit} waist
+                  </span>
+                )}
+                {m.notes && <span className="block text-xs text-neutral-400 mt-0.5">{m.notes}</span>}
+              </span>
+              <span className="flex items-center gap-2 shrink-0">
+                <span className="text-xs text-neutral-400">
+                  {new Date(`${m.recorded_at}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => deleteMeasurement(m.id)}
+                  aria-label="Delete measurement"
+                  className="text-neutral-300 hover:text-red-600 p-1"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function ProfileModal({ session, profile, onClose, onSaved }) {
   const [units, setUnits] = useState(profile.measurement_system === "imperial" ? "imperial" : "metric");
   const [weight, setWeight] = useState(kgToDisplay(profile.weight_kg, units));
@@ -1758,6 +1977,7 @@ function TrainingLog({ session, onLogout }) {
     startRestTimer, adjustRestTimer, pauseResumeRestTimer, skipRestTimer,
   } = useRestTimer();
   const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
+  const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, session.user.id);
 
   useEffect(() => {
     (async () => {
@@ -2580,6 +2800,16 @@ function TrainingLog({ session, onLogout }) {
 
         <div className="mt-10 border-b border-neutral-300" />
 
+        <MeasurementsSection
+          measurements={measurements}
+          measurementsLoading={measurementsLoading}
+          addMeasurement={addMeasurement}
+          deleteMeasurement={deleteMeasurement}
+          measurementSystem={profile?.measurement_system || "metric"}
+        />
+
+        <div className="mt-10 border-b border-neutral-300" />
+
         <div className="mt-6 pb-16">
           <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
             Exercise library
@@ -2817,6 +3047,9 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   // Routines belong to the coach's own account, not the client being
   // viewed — a reusable program the coach can drop into any client's plan.
   const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
+  // Measurements, unlike routines, belong to the client being viewed — the
+  // coach is logging/reviewing that client's own body-measurement history.
+  const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, client.id);
 
   useEffect(() => {
     loadHistory();
@@ -3542,6 +3775,16 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   ))}
               </ul>
             )}
+          </div>
+
+          <div className="mt-6 border-t border-neutral-100 pt-5">
+            <MeasurementsSection
+              measurements={measurements}
+              measurementsLoading={measurementsLoading}
+              addMeasurement={addMeasurement}
+              deleteMeasurement={deleteMeasurement}
+              measurementSystem={client.measurement_system === "imperial" ? "imperial" : "metric"}
+            />
           </div>
         </div>
       </div>
