@@ -868,6 +868,51 @@ function computePersonalRecords(workoutsList) {
   return best;
 }
 
+// Flattens a list of workouts (as returned by the workouts REST endpoint)
+// into one CSV row per set, so every logged weight/rep/RPE/tag is exportable
+// — not just a per-workout summary. Old-shape rows are hydrated first so
+// the export is complete regardless of when the workout was saved.
+function csvEscape(value) {
+  const str = String(value ?? "");
+  return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+}
+function buildWorkoutsCsv(workouts) {
+  const header = ["Date", "Status", "Category", "Exercise", "Set", "Type", "Weight", "Reps", "Time (sec)", "RPE", "Completed"];
+  const rows = [header];
+  for (const w of workouts || []) {
+    const groups = (w.entries || []).map(hydrateExerciseEntry);
+    for (const g of groups) {
+      g.sets.forEach((s, i) => {
+        rows.push([
+          w.workout_date,
+          w.status,
+          g.category,
+          g.exercise,
+          i + 1,
+          SET_TYPES.find((t) => t.value === s.type)?.label || s.type,
+          s.weight,
+          s.reps,
+          s.time,
+          s.rpe,
+          s.completed ? "Yes" : "No",
+        ]);
+      });
+    }
+  }
+  return rows.map((r) => r.map(csvEscape).join(",")).join("\r\n");
+}
+function downloadCsv(filename, csv) {
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function formatRestClock(totalSeconds) {
   const s = Math.max(0, Math.round(totalSeconds));
   const m = Math.floor(s / 60);
@@ -1972,6 +2017,8 @@ function TrainingLog({ session, onLogout }) {
   const [savingRoutine, setSavingRoutine] = useState(false);
   const [routineError, setRoutineError] = useState("");
 
+  const [exportingCsv, setExportingCsv] = useState(false);
+
   const {
     restActive, restRemaining, restLabel, restPaused,
     startRestTimer, adjustRestTimer, pauseResumeRestTimer, skipRestTimer,
@@ -2021,6 +2068,24 @@ function TrainingLog({ session, onLogout }) {
       // PRs just won't show — not worth surfacing an error for a nice-to-have.
     } finally {
       setPrLoading(false);
+    }
+  }
+
+  // Exports the client's full workout history (not just the 10 shown in the
+  // history list) as one CSV row per set.
+  async function handleExportCsv() {
+    setExportingCsv(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${session.user.id}&select=workout_date,status,entries&order=workout_date.desc&limit=1000`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      downloadCsv(`workout-history-${new Date().toISOString().slice(0, 10)}.csv`, buildWorkoutsCsv(await res.json()));
+    } catch {
+      // Export just silently doesn't happen — the button stays clickable to retry.
+    } finally {
+      setExportingCsv(false);
     }
   }
 
@@ -2694,9 +2759,19 @@ function TrainingLog({ session, onLogout }) {
         <div className="mt-10 border-b border-neutral-300" />
 
         <div className="mt-6">
-          <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
-            Exercise history details
-          </p>
+          <div className="flex items-center justify-between gap-3 mb-1">
+            <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500">
+              Exercise history details
+            </p>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              disabled={exportingCsv}
+              className="text-xs font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-50 shrink-0"
+            >
+              {exportingCsv ? "Exporting…" : "Export CSV"}
+            </button>
+          </div>
           {history.length > 0 && !historyLoading && (
             <p className="text-xs text-neutral-400 mb-2">Tap a day to amend it, or use the bin icon to delete it.</p>
           )}
@@ -3051,6 +3126,8 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   // coach is logging/reviewing that client's own body-measurement history.
   const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, client.id);
 
+  const [exportingCsv, setExportingCsv] = useState(false);
+
   useEffect(() => {
     loadHistory();
     loadPersonalRecords();
@@ -3077,6 +3154,25 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       // PRs just won't show — not worth surfacing an error for a nice-to-have.
     } finally {
       setPrLoading(false);
+    }
+  }
+
+  // Exports this client's full workout history (not just the 10 shown in
+  // the history list) as one CSV row per set.
+  async function handleExportCsv() {
+    setExportingCsv(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&select=workout_date,status,entries&order=workout_date.desc&limit=1000`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      const slug = (client.full_name || client.email || "client").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      downloadCsv(`${slug}-workout-history-${new Date().toISOString().slice(0, 10)}.csv`, buildWorkoutsCsv(await res.json()));
+    } catch {
+      // Export just silently doesn't happen — the button stays clickable to retry.
+    } finally {
+      setExportingCsv(false);
     }
   }
 
@@ -3710,9 +3806,19 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
           )}
 
           <div className="mt-6 border-t border-neutral-100 pt-5">
-            <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
-              History
-            </p>
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500">
+                History
+              </p>
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                disabled={exportingCsv}
+                className="text-xs font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-50 shrink-0"
+              >
+                {exportingCsv ? "Exporting…" : "Export CSV"}
+              </button>
+            </div>
             {historyLoading ? (
               <p className="text-sm text-neutral-400">Loading…</p>
             ) : historyError ? (
