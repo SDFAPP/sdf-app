@@ -895,6 +895,44 @@ function computePersonalRecords(workoutsList) {
   return best;
 }
 
+// Per-exercise training volume (sum of weight x reps across counted sets)
+// for each day it was logged — the data behind the volume trend chart.
+// Warm-up sets are excluded (not real work); drop/failure sets DO count
+// here, unlike in computePersonalRecords, since total volume cares about
+// everything actually lifted, not just the single best effort. Exercises
+// with no numeric weight (bodyweight/time-based) never accumulate volume
+// and so never appear — there's nothing meaningful to chart for them.
+function computeVolumeHistory(workoutsList) {
+  const byExercise = {};
+  for (const w of workoutsList || []) {
+    const groups = (w.entries || []).map(hydrateExerciseEntry);
+    for (const g of groups) {
+      let volume = 0;
+      for (const s of g.sets) {
+        if (s.type === "warmup") continue;
+        const weight = Number(s.weight);
+        const reps = Number(s.reps);
+        if (weight > 0 && Number.isInteger(reps) && reps > 0) volume += weight * reps;
+      }
+      if (volume <= 0) continue;
+      (byExercise[g.exercise] ||= []).push({ date: w.workout_date, volume });
+    }
+  }
+  // Merge same-day entries (shouldn't normally happen — one workout row per
+  // client per day — but stay correct if it ever does) and sort oldest
+  // first, ready to feed straight into a chart left-to-right.
+  Object.keys(byExercise).forEach((ex) => {
+    const merged = {};
+    byExercise[ex].forEach(({ date, volume }) => {
+      merged[date] = (merged[date] || 0) + volume;
+    });
+    byExercise[ex] = Object.entries(merged)
+      .map(([date, volume]) => ({ date, volume }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  });
+  return byExercise;
+}
+
 // Flattens a list of workouts (as returned by the workouts REST endpoint)
 // into one CSV row per set, so every logged weight/rep/RPE/tag is exportable
 // — not just a per-workout summary. Old-shape rows are hydrated first so
@@ -1231,6 +1269,42 @@ function useMeasurements(session, clientId) {
   }
 
   return { measurements, measurementsLoading, addMeasurement, deleteMeasurement };
+}
+
+// Personal records + volume trends, computed client-side from a client's
+// completed workout history. One fetch feeds both computePersonalRecords
+// and computeVolumeHistory, shared by TrainingLog (own history) and
+// ClientWorkspace (viewed client's history) via `clientId`.
+function useTrainingStats(session, clientId) {
+  const [personalRecords, setPersonalRecords] = useState({});
+  const [volumeHistory, setVolumeHistory] = useState({});
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  useEffect(() => {
+    loadTrainingStats();
+  }, [clientId]);
+
+  // A 200-workout cap comfortably covers a year-plus of consistent
+  // training without pulling the whole table.
+  async function loadTrainingStats() {
+    setStatsLoading(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${clientId}&status=eq.completed&select=workout_date,entries&order=workout_date.desc&limit=200`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      const rows = await res.json();
+      setPersonalRecords(computePersonalRecords(rows));
+      setVolumeHistory(computeVolumeHistory(rows));
+    } catch {
+      // Stats just won't show — not worth surfacing an error for a nice-to-have.
+    } finally {
+      setStatsLoading(false);
+    }
+  }
+
+  return { personalRecords, volumeHistory, statsLoading, loadTrainingStats };
 }
 
 const EXERCISE_LIBRARY = [
@@ -1645,6 +1719,121 @@ function WeightConverter() {
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+// A minimal hand-rolled SVG bar chart — no charting library, consistent
+// with the rest of the app (Web Audio beeps, custom timers, etc. are all
+// hand-rolled too). `points` is ascending-by-date [{date, volume}]. The
+// viewBox is an abstract coordinate space; preserveAspectRatio="none" lets
+// the SVG stretch to fill whatever width its container gives it, so bars
+// stay evenly spaced on any screen size without any JS measuring.
+function VolumeChart({ points }) {
+  const width = 600;
+  const height = 160;
+  const padding = 8;
+  const maxVolume = Math.max(...points.map((p) => p.volume), 1);
+  const barGap = 6;
+  const barWidth = Math.max(4, (width - padding * 2) / points.length - barGap);
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      className="w-full h-40"
+      role="img"
+      aria-label="Training volume by session"
+    >
+      <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} className="stroke-neutral-200" strokeWidth="1" />
+      {points.map((p, i) => {
+        const barHeight = (p.volume / maxVolume) * (height - padding * 2 - 4);
+        const x = padding + i * (barWidth + barGap);
+        const y = height - padding - barHeight;
+        return (
+          <rect key={p.date} x={x} y={y} width={barWidth} height={Math.max(1, barHeight)} className="fill-neutral-900">
+            <title>{`${p.date}: ${Math.round(p.volume).toLocaleString()}`}</title>
+          </rect>
+        );
+      })}
+    </svg>
+  );
+}
+
+// Volume (sum of weight x reps) trend for one exercise at a time, picked
+// from a dropdown — defaults to whichever exercise was most recently
+// logged, since that's the one a client/coach is most likely checking on.
+function VolumeSection({ volumeHistory, loading, unitLabel }) {
+  const exercises = Object.keys(volumeHistory).sort((a, b) => a.localeCompare(b));
+  const [selected, setSelected] = useState("");
+
+  useEffect(() => {
+    if (selected && volumeHistory[selected]) return;
+    if (exercises.length === 0) {
+      setSelected("");
+      return;
+    }
+    let best = exercises[0];
+    let bestDate = volumeHistory[best].at(-1)?.date || "";
+    for (const ex of exercises) {
+      const d = volumeHistory[ex].at(-1)?.date || "";
+      if (d > bestDate) {
+        best = ex;
+        bestDate = d;
+      }
+    }
+    setSelected(best);
+    // Only re-pick a default when the available exercises actually change —
+    // not on every render, which would fight the user's own selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [volumeHistory]);
+
+  const points = (selected ? volumeHistory[selected] : null) || [];
+  const recentPoints = points.slice(-12);
+
+  return (
+    <div className="mt-6">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500">
+          Volume
+        </p>
+        {exercises.length > 0 && (
+          <select
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            aria-label="Exercise for volume chart"
+            className="text-xs border border-neutral-300 px-2 py-1.5"
+          >
+            {exercises.map((ex) => (
+              <option key={ex} value={ex}>{ex}</option>
+            ))}
+          </select>
+        )}
+      </div>
+      {loading ? (
+        <p className="text-sm text-neutral-400">Loading…</p>
+      ) : recentPoints.length === 0 ? (
+        // Also covers the render right after mount, before the effect above
+        // has picked a default exercise — exercises can be non-empty for a
+        // moment while `selected` (and so recentPoints) is still "".
+        <p className="text-sm text-neutral-500">
+          Log weight and reps on a completed set to see volume trends here.
+        </p>
+      ) : (
+        <div className="border border-neutral-200 bg-white p-4">
+          <VolumeChart points={recentPoints} />
+          <div className="flex items-center justify-between mt-1 text-xs text-neutral-400">
+            <span>
+              {new Date(`${recentPoints[0].date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+            </span>
+            <span>
+              Total volume ({unitLabel}×reps), most recent {recentPoints.length} session{recentPoints.length === 1 ? "" : "s"}
+            </span>
+            <span>
+              {new Date(`${recentPoints.at(-1).date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+            </span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2266,9 +2455,6 @@ function TrainingLog({ session, onLogout }) {
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
 
-  const [personalRecords, setPersonalRecords] = useState({});
-  const [prLoading, setPrLoading] = useState(false);
-
   const [routineNameDraft, setRoutineNameDraft] = useState("");
   const [savingRoutine, setSavingRoutine] = useState(false);
   const [routineError, setRoutineError] = useState("");
@@ -2281,6 +2467,7 @@ function TrainingLog({ session, onLogout }) {
   } = useRestTimer();
   const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
   const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, session.user.id);
+  const { personalRecords, volumeHistory, statsLoading, loadTrainingStats } = useTrainingStats(session, session.user.id);
 
   useEffect(() => {
     (async () => {
@@ -2305,27 +2492,7 @@ function TrainingLog({ session, onLogout }) {
   useEffect(() => {
     loadToday();
     loadHistory();
-    loadPersonalRecords();
   }, []);
-
-  // PRs are computed client-side from every completed workout, not just the
-  // last 10 days shown in history — a 200-day cap comfortably covers a
-  // year-plus of consistent training without pulling the whole table.
-  async function loadPersonalRecords() {
-    setPrLoading(true);
-    try {
-      const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${session.user.id}&status=eq.completed&select=workout_date,entries&order=workout_date.desc&limit=200`,
-        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
-      );
-      if (!res.ok) return;
-      setPersonalRecords(computePersonalRecords(await res.json()));
-    } catch {
-      // PRs just won't show — not worth surfacing an error for a nice-to-have.
-    } finally {
-      setPrLoading(false);
-    }
-  }
 
   // Exports the client's full workout history (not just the 10 shown in the
   // history list) as one CSV row per set.
@@ -2667,7 +2834,7 @@ function TrainingLog({ session, onLogout }) {
       // A day other than today was just amended — refresh the history list
       // so its summary/status reflects the change.
       if (openWorkoutDate !== new Date().toISOString().slice(0, 10)) loadHistory();
-      loadPersonalRecords();
+      loadTrainingStats();
     } catch (err) {
       setSaveError(err.message || "Something went wrong saving this workout.");
     } finally {
@@ -3007,7 +3174,7 @@ function TrainingLog({ session, onLogout }) {
           <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
             Personal records
           </p>
-          {prLoading ? (
+          {statsLoading ? (
             <p className="text-sm text-neutral-400">Loading…</p>
           ) : Object.keys(personalRecords).length === 0 ? (
             <p className="text-sm text-neutral-500">
@@ -3033,6 +3200,8 @@ function TrainingLog({ session, onLogout }) {
             </ul>
           )}
         </div>
+
+        <VolumeSection volumeHistory={volumeHistory} loading={statsLoading} unitLabel={unitLabel} />
 
         <div className="mt-10 border-b border-neutral-300" />
 
@@ -3274,24 +3443,21 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
 
   const [search, setSearch] = useState("");
 
-  const [personalRecords, setPersonalRecords] = useState({});
-  const [prLoading, setPrLoading] = useState(false);
-
   const [routineNameDraft, setRoutineNameDraft] = useState("");
   const [savingRoutine, setSavingRoutine] = useState(false);
   const [routineError, setRoutineError] = useState("");
   // Routines belong to the coach's own account, not the client being
   // viewed — a reusable program the coach can drop into any client's plan.
   const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
-  // Measurements, unlike routines, belong to the client being viewed — the
-  // coach is logging/reviewing that client's own body-measurement history.
+  // Measurements and training stats, unlike routines, belong to the client
+  // being viewed — the coach is reviewing/logging that client's own data.
   const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, client.id);
+  const { personalRecords, volumeHistory, statsLoading, loadTrainingStats } = useTrainingStats(session, client.id);
 
   const [exportingCsv, setExportingCsv] = useState(false);
 
   useEffect(() => {
     loadHistory();
-    loadPersonalRecords();
   }, []);
 
   // Re-load whichever day is selected so the coach edits that day's actual
@@ -3299,24 +3465,6 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   useEffect(() => {
     loadDay(targetDate);
   }, [targetDate]);
-
-  // PRs computed client-side from this client's completed workouts, same as
-  // the client's own TrainingLog — lets the coach see progress at a glance.
-  async function loadPersonalRecords() {
-    setPrLoading(true);
-    try {
-      const res = await fetch(
-        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&status=eq.completed&select=workout_date,entries&order=workout_date.desc&limit=200`,
-        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
-      );
-      if (!res.ok) return;
-      setPersonalRecords(computePersonalRecords(await res.json()));
-    } catch {
-      // PRs just won't show — not worth surfacing an error for a nice-to-have.
-    } finally {
-      setPrLoading(false);
-    }
-  }
 
   // Exports this client's full workout history (not just the 10 shown in
   // the history list) as one CSV row per set.
@@ -3598,7 +3746,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         setWorkoutStatus(rows[0].status);
       }
       loadHistory();
-      loadPersonalRecords();
+      loadTrainingStats();
     } catch (err) {
       setSaveError(err.message || "Something went wrong assigning this workout.");
     } finally {
@@ -3915,7 +4063,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
             <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
               Personal records
             </p>
-            {prLoading ? (
+            {statsLoading ? (
               <p className="text-sm text-neutral-400">Loading…</p>
             ) : Object.keys(personalRecords).length === 0 ? (
               <p className="text-sm text-neutral-500">No PRs yet — logged sets need weight and reps to count.</p>
@@ -3938,6 +4086,8 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   ))}
               </ul>
             )}
+
+            <VolumeSection volumeHistory={volumeHistory} loading={statsLoading} unitLabel={unitLabel} />
           </div>
 
           <div className="mt-6 border-t border-neutral-100 pt-5">
