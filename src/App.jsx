@@ -2547,7 +2547,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       if (rows[0]) {
         setWorkoutId(rows[0].id);
         setWorkoutStatus(rows[0].status);
-        setWorkoutEntries((rows[0].entries || []).map((e) => ({ id: crypto.randomUUID(), ...e })));
+        setWorkoutEntries((rows[0].entries || []).map(hydrateExerciseEntry));
         setBuilderOpen(true);
       }
     } catch {
@@ -2581,22 +2581,68 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         id: crypto.randomUUID(),
         exercise: name,
         category: activeCategory,
-        weight: "",
-        reps: isTimeBased ? "" : "5",
-        time: isTimeBased ? "20" : "",
-        rest: isTimeBased ? "3" : "1",
-        sets: isTimeBased ? "6" : "3",
+        restMinutes: isTimeBased ? "3" : "1",
+        sets: [
+          {
+            id: crypto.randomUUID(),
+            weight: "",
+            reps: isTimeBased ? "" : "5",
+            time: isTimeBased ? "20" : "",
+            rpe: "",
+            type: "normal",
+            completed: false,
+            completedAt: null,
+          },
+        ],
       },
     ]);
     setBuilderOpen(true);
   }
 
-  function updateEntry(id, field, value) {
-    setWorkoutEntries((prev) => prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)));
+  function addSet(groupId) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) => (g.id !== groupId ? g : { ...g, sets: [...g.sets, newSet(g.sets[g.sets.length - 1])] }))
+    );
   }
 
-  function removeEntry(id) {
-    setWorkoutEntries((prev) => prev.filter((e) => e.id !== id));
+  function updateGroupField(groupId, field, value) {
+    setWorkoutEntries((prev) => prev.map((g) => (g.id === groupId ? { ...g, [field]: value } : g)));
+  }
+
+  function updateSet(groupId, setId, field, value) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) =>
+        g.id !== groupId ? g : { ...g, sets: g.sets.map((s) => (s.id === setId ? { ...s, [field]: value } : s)) }
+      )
+    );
+  }
+
+  function removeSet(groupId, setId) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) => (g.id !== groupId ? g : { ...g, sets: g.sets.filter((s) => s.id !== setId) }))
+    );
+  }
+
+  function removeExerciseGroup(groupId) {
+    setWorkoutEntries((prev) => prev.filter((g) => g.id !== groupId));
+  }
+
+  // No live rest timer here — a coach is prescribing sets, not performing
+  // them. This just lets the coach mark/adjust which sets are done, e.g.
+  // when correcting what a client logged.
+  function toggleSetComplete(groupId, setId) {
+    setWorkoutEntries((prev) =>
+      prev.map((g) =>
+        g.id !== groupId
+          ? g
+          : {
+              ...g,
+              sets: g.sets.map((s) =>
+                s.id !== setId ? s : { ...s, completed: !s.completed, completedAt: !s.completed ? new Date().toISOString() : null }
+              ),
+            }
+      )
+    );
   }
 
   async function assignWorkout() {
@@ -2604,32 +2650,41 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       setSaveError("Add at least one exercise before assigning.");
       return;
     }
-    for (const entry of workoutEntries) {
-      const sets = Number(entry.sets);
-      if (!Number.isInteger(sets) || sets <= 0) {
-        setSaveError(`Enter a valid number of sets for ${entry.exercise}.`);
+    for (const group of workoutEntries) {
+      if (group.sets.length === 0) {
+        setSaveError(`Add at least one set for ${group.exercise}, or remove it.`);
         return;
       }
-      if (entry.category === "Sprint Interval Training") {
-        const time = Number(entry.time);
-        if (!Number.isInteger(time) || time <= 0) {
-          setSaveError(`Enter a valid sprint time for ${entry.exercise}.`);
+      if (group.restMinutes.trim() !== "" && !(Number(group.restMinutes) >= 0)) {
+        setSaveError(`Enter a valid rest time for ${group.exercise}, or leave it blank.`);
+        return;
+      }
+      for (const s of group.sets) {
+        if (group.category === "Sprint Interval Training") {
+          const time = Number(s.time);
+          if (!Number.isInteger(time) || time <= 0) {
+            setSaveError(`Enter a valid sprint time for every set of ${group.exercise}.`);
+            return;
+          }
+        } else {
+          const reps = Number(s.reps);
+          const allowZero = s.type === "failure";
+          if (!Number.isInteger(reps) || (allowZero ? reps < 0 : reps <= 0)) {
+            setSaveError(`Enter a valid number of reps for every set of ${group.exercise}.`);
+            return;
+          }
+        }
+        if (s.weight.trim() !== "" && !(Number(s.weight) >= 0)) {
+          setSaveError(`Enter a valid weight for ${group.exercise}, or leave it blank.`);
           return;
         }
-      } else {
-        const reps = Number(entry.reps);
-        if (!Number.isInteger(reps) || reps <= 0) {
-          setSaveError(`Enter a valid number of reps for ${entry.exercise}.`);
-          return;
+        if (s.rpe.trim() !== "") {
+          const rpeNum = Number(s.rpe);
+          if (!(rpeNum >= 6 && rpeNum <= 10) || Math.round(rpeNum * 2) !== rpeNum * 2) {
+            setSaveError(`RPE must be between 6 and 10 in 0.5 steps for ${group.exercise}, or left blank.`);
+            return;
+          }
         }
-      }
-      if (entry.weight.trim() !== "" && !(Number(entry.weight) >= 0)) {
-        setSaveError(`Enter a valid weight for ${entry.exercise}, or leave it blank.`);
-        return;
-      }
-      if (entry.rest.trim() !== "" && !(Number(entry.rest) >= 0)) {
-        setSaveError(`Enter a valid rest time for ${entry.exercise}, or leave it blank.`);
-        return;
       }
     }
     setSaving(true);
@@ -2639,7 +2694,10 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       // "assigned" just because a coach edited it — only set assigned when
       // creating a new plan or editing one that's still pending.
       const body = {
-        entries: workoutEntries.map(({ id, ...rest }) => rest),
+        entries: workoutEntries.map(({ id, sets, ...rest }) => ({
+          ...rest,
+          sets: sets.map(({ id, ...s }) => s),
+        })),
         status: workoutStatus === "completed" ? "completed" : "assigned",
         assigned_by: session.user.id,
       };
@@ -2790,89 +2848,140 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   Search the exercise library below and click an exercise to add it here.
                 </p>
               ) : (
-                <div className="space-y-3">
-                  {workoutEntries.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="flex flex-wrap items-center gap-2 sm:gap-3 border-b border-neutral-100 pb-3 last:border-0 last:pb-0"
-                    >
-                      <span className="text-sm font-medium text-neutral-900 w-full sm:w-auto sm:min-w-[140px]">
-                        {entry.exercise}
-                        <span className="block sm:inline sm:ml-1.5 text-xs font-normal text-neutral-400">
-                          {abbreviateCategory(entry.category)}
-                        </span>
-                      </span>
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        value={entry.weight}
-                        onChange={(e) => updateEntry(entry.id, "weight", e.target.value)}
-                        placeholder={`Weight (${unitLabel})`}
-                        aria-label={`Weight in ${unitLabel === "lbs" ? "pounds" : "kilograms"} for ${entry.exercise}`}
-                        className="w-24 sm:w-28 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                      />
-                      {entry.category === "Sprint Interval Training" ? (
-                        <span className="flex items-center gap-1.5 shrink-0">
-                          <input
-                            type="number"
-                            inputMode="numeric"
-                            value={entry.time}
-                            onChange={(e) => updateEntry(entry.id, "time", e.target.value)}
-                            placeholder="Time"
-                            aria-label={`Sprint time in seconds for ${entry.exercise}`}
-                            className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                          />
-                          <span className="text-xs text-neutral-400">sec sprint</span>
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1.5 shrink-0">
-                          <input
-                            type="number"
-                            inputMode="numeric"
-                            value={entry.reps}
-                            onChange={(e) => updateEntry(entry.id, "reps", e.target.value)}
-                            placeholder="Reps"
-                            aria-label={`Reps for ${entry.exercise}`}
-                            className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                          />
-                          <span className="text-xs text-neutral-400">reps</span>
-                        </span>
-                      )}
-                      <span className="flex items-center gap-1.5 shrink-0">
-                        <input
-                          type="number"
-                          inputMode="decimal"
-                          step="0.5"
-                          value={entry.rest}
-                          onChange={(e) => updateEntry(entry.id, "rest", e.target.value)}
-                          placeholder="Rest"
-                          aria-label={`Rest in minutes for ${entry.exercise}`}
-                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                        />
-                        <span className="text-xs text-neutral-400">min rest</span>
-                      </span>
-                      <span className="flex items-center gap-1.5 shrink-0">
-                        <input
-                          type="number"
-                          inputMode="numeric"
-                          value={entry.sets}
-                          onChange={(e) => updateEntry(entry.id, "sets", e.target.value)}
-                          placeholder="Sets"
-                          aria-label={`Sets for ${entry.exercise}`}
-                          className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                        />
-                        <span className="text-xs text-neutral-400">sets</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeEntry(entry.id)}
-                        className="ml-auto text-neutral-400 hover:text-red-600 p-1"
-                        aria-label="Remove exercise"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  ))}
+                <div className="space-y-6">
+                  {workoutEntries.map((group) => {
+                    const isTimeBased = group.category === "Sprint Interval Training";
+                    return (
+                      <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                          <div>
+                            <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
+                            <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                inputMode="decimal"
+                                step="0.5"
+                                value={group.restMinutes}
+                                onChange={(e) => updateGroupField(group.id, "restMinutes", e.target.value)}
+                                aria-label={`Rest in minutes for ${group.exercise}`}
+                                className="w-14 border border-neutral-300 px-2 py-1.5 text-sm"
+                              />
+                              <span className="text-xs text-neutral-400">min rest</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => removeExerciseGroup(group.id)}
+                              aria-label={`Remove ${group.exercise}`}
+                              className="text-neutral-400 hover:text-red-600 p-1"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {group.sets.map((s, i) => (
+                            <div
+                              key={s.id}
+                              className={`flex flex-wrap items-center gap-2 p-2 border ${
+                                s.completed ? "bg-emerald-50 border-emerald-200" : "border-neutral-200"
+                              }`}
+                            >
+                              <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
+                              <select
+                                value={s.type}
+                                onChange={(e) => updateSet(group.id, s.id, "type", e.target.value)}
+                                aria-label={`Set type for set ${i + 1} of ${group.exercise}`}
+                                className={`text-xs border px-1.5 py-2 sm:py-1.5 shrink-0 ${SET_TYPE_STYLES[s.type]}`}
+                              >
+                                {SET_TYPES.map((t) => (
+                                  <option key={t.value} value={t.value}>{t.label}</option>
+                                ))}
+                              </select>
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={s.weight}
+                                onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
+                                placeholder={`Weight (${unitLabel})`}
+                                aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
+                                className="w-20 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                              />
+                              {isTimeBased ? (
+                                <input
+                                  type="number"
+                                  inputMode="numeric"
+                                  value={s.time}
+                                  onChange={(e) => updateSet(group.id, s.id, "time", e.target.value)}
+                                  placeholder="Sec"
+                                  aria-label={`Sprint time for set ${i + 1} of ${group.exercise}`}
+                                  className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                                />
+                              ) : (
+                                <input
+                                  type="number"
+                                  inputMode="numeric"
+                                  value={s.reps}
+                                  onChange={(e) => updateSet(group.id, s.id, "reps", e.target.value)}
+                                  placeholder="Reps"
+                                  aria-label={`Reps for set ${i + 1} of ${group.exercise}`}
+                                  className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                                />
+                              )}
+                              <input
+                                type="number"
+                                inputMode="decimal"
+                                step="0.5"
+                                min="6"
+                                max="10"
+                                value={s.rpe}
+                                onChange={(e) => updateSet(group.id, s.id, "rpe", e.target.value)}
+                                placeholder="RPE"
+                                aria-label={`RPE for set ${i + 1} of ${group.exercise}`}
+                                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => toggleSetComplete(group.id, s.id)}
+                                aria-pressed={s.completed}
+                                aria-label={
+                                  s.completed
+                                    ? `Mark set ${i + 1} of ${group.exercise} incomplete`
+                                    : `Mark set ${i + 1} of ${group.exercise} complete`
+                                }
+                                className={`ml-auto shrink-0 w-9 h-9 flex items-center justify-center border ${
+                                  s.completed
+                                    ? "bg-emerald-600 border-emerald-600 text-white"
+                                    : "border-neutral-300 text-neutral-300 hover:border-neutral-500"
+                                }`}
+                              >
+                                <Check size={16} />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => removeSet(group.id, s.id)}
+                                aria-label={`Remove set ${i + 1} of ${group.exercise}`}
+                                className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
+                              >
+                                <X size={14} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => addSet(group.id)}
+                          className="mt-2 flex items-center gap-1 text-xs font-medium text-neutral-600 hover:text-neutral-900"
+                        >
+                          <Plus size={12} /> Add set
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
@@ -2922,7 +3031,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                 </p>
               )}
 
-              <div className="mt-4 flex items-center gap-3">
+              <div className="mt-4 flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   disabled={saving || workoutEntries.length === 0}
@@ -2942,6 +3051,13 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                 >
                   Cancel
                 </button>
+                {workoutEntries.length > 0 && (
+                  <span className="w-full sm:w-auto text-xs text-neutral-400">
+                    {workoutEntries.length} exercise{workoutEntries.length === 1 ? "" : "s"},{" "}
+                    {workoutEntries.reduce((n, g) => n + g.sets.filter((s) => s.completed).length, 0)}/
+                    {workoutEntries.reduce((n, g) => n + g.sets.length, 0)} sets done
+                  </span>
+                )}
               </div>
             </div>
           )}
