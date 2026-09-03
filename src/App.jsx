@@ -1041,6 +1041,69 @@ function useRestTimer() {
   };
 }
 
+// Personal templates ("routines"): a saved snapshot of a builder's exercise
+// groups that can be reused later instead of rebuilding it from scratch.
+// Same hydrateExerciseEntry-compatible shape as workouts.entries, minus any
+// completion state — a template is a plan, never a log. Shared between
+// TrainingLog and ClientWorkspace; each owns its own routines by
+// session.user.id (a client's personal templates vs. a coach's reusable
+// programs are never the same rows).
+function useRoutines(session) {
+  const [routines, setRoutines] = useState([]);
+  const [routinesLoading, setRoutinesLoading] = useState(false);
+
+  useEffect(() => {
+    loadRoutines();
+  }, []);
+
+  async function loadRoutines() {
+    setRoutinesLoading(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/routines?owner_id=eq.${session.user.id}&select=id,name,category,entries&order=created_at.desc`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      setRoutines(await res.json());
+    } catch {
+      // Routines list just stays empty/stale — not worth surfacing an error
+      // for what's a convenience feature, not the workout log itself.
+    } finally {
+      setRoutinesLoading(false);
+    }
+  }
+
+  async function saveAsRoutine(name, category, groups) {
+    const entries = groups.map(({ id, sets, ...rest }) => ({
+      ...rest,
+      sets: sets.map(({ id, completed, completedAt, ...s }) => ({ ...s, completed: false, completedAt: null })),
+    }));
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/routines`, {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify({ owner_id: session.user.id, name, category, entries }),
+    });
+    if (!res.ok) throw new Error("Could not save this routine.");
+    await loadRoutines();
+  }
+
+  async function deleteRoutine(id) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/routines?id=eq.${id}`, {
+      method: "DELETE",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) throw new Error("Could not delete this routine.");
+    setRoutines((prev) => prev.filter((r) => r.id !== id));
+  }
+
+  return { routines, routinesLoading, saveAsRoutine, deleteRoutine };
+}
+
 const EXERCISE_LIBRARY = [
   "Ab Crunch Machine", "Arnold Press", "Assault Bike Sprint", "Assisted Dip", "Assisted Pull-Up",
   "Back Extension", "Back Squat", "Band Pull-Apart", "Barbell Curl", "Barbell Row",
@@ -1686,10 +1749,15 @@ function TrainingLog({ session, onLogout }) {
   const [personalRecords, setPersonalRecords] = useState({});
   const [prLoading, setPrLoading] = useState(false);
 
+  const [routineNameDraft, setRoutineNameDraft] = useState("");
+  const [savingRoutine, setSavingRoutine] = useState(false);
+  const [routineError, setRoutineError] = useState("");
+
   const {
     restActive, restRemaining, restLabel, restPaused,
     startRestTimer, adjustRestTimer, pauseResumeRestTimer, skipRestTimer,
   } = useRestTimer();
+  const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
 
   useEffect(() => {
     (async () => {
@@ -1847,6 +1915,37 @@ function TrainingLog({ session, onLogout }) {
       },
     ]);
     setBuilderOpen(true);
+  }
+
+  // Adds a saved routine's exercises into the builder — additive, like
+  // adding one exercise at a time from the library, so it never discards
+  // whatever's already been added.
+  function loadRoutineIntoBuilder(routine) {
+    const groups = (routine.entries || []).map(hydrateExerciseEntry);
+    setWorkoutEntries((prev) => [...prev, ...groups]);
+    setBuilderOpen(true);
+  }
+
+  async function handleSaveRoutine() {
+    const name = routineNameDraft.trim();
+    if (!name) {
+      setRoutineError("Give this routine a name first.");
+      return;
+    }
+    if (workoutEntries.length === 0) {
+      setRoutineError("Add at least one exercise before saving it as a routine.");
+      return;
+    }
+    setSavingRoutine(true);
+    setRoutineError("");
+    try {
+      await saveAsRoutine(name, activeCategory, workoutEntries);
+      setRoutineNameDraft("");
+    } catch (err) {
+      setRoutineError(err.message || "Could not save this routine.");
+    } finally {
+      setSavingRoutine(false);
+    }
   }
 
   function addSet(groupId) {
@@ -2149,6 +2248,38 @@ function TrainingLog({ session, onLogout }) {
                 Your coach assigned this workout. Adjust anything you need, then save when you're done.
               </p>
             )}
+            {routines.length > 0 && (
+              <div className="mb-5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-2">
+                  Your routines
+                </p>
+                <ul className="divide-y divide-neutral-200 border border-neutral-200">
+                  {routines.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <button
+                        type="button"
+                        onClick={() => loadRoutineIntoBuilder(r)}
+                        className="flex-1 text-left"
+                      >
+                        <span className="text-sm text-neutral-800">{r.name}</span>
+                        <span className="ml-1.5 text-xs text-neutral-400">
+                          {abbreviateCategory(r.category)} · {(r.entries || []).length} exercise
+                          {(r.entries || []).length === 1 ? "" : "s"}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteRoutine(r.id)}
+                        aria-label={`Delete routine ${r.name}`}
+                        className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {workoutEntries.length === 0 ? (
               <p className="text-sm text-neutral-500">
                 Search the exercise library below (use the category tabs above to browse) and click an exercise to add it here.
@@ -2315,6 +2446,28 @@ function TrainingLog({ session, onLogout }) {
                 {workoutEntries.reduce((n, g) => n + g.sets.length, 0)} sets done
               </span>
             </div>
+
+            {workoutEntries.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-neutral-100 flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  value={routineNameDraft}
+                  onChange={(e) => setRoutineNameDraft(e.target.value)}
+                  placeholder="Routine name"
+                  aria-label="Routine name"
+                  className="w-40 border border-neutral-300 px-2 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  disabled={savingRoutine}
+                  onClick={handleSaveRoutine}
+                  className="text-sm font-medium text-neutral-700 border border-neutral-300 px-3 py-2 hover:border-neutral-500 disabled:opacity-50"
+                >
+                  {savingRoutine ? "Saving…" : "Save as routine"}
+                </button>
+                {routineError && <p className="w-full text-xs text-red-600">{routineError}</p>}
+              </div>
+            )}
           </div>
         )}
 
@@ -2658,6 +2811,13 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   const [personalRecords, setPersonalRecords] = useState({});
   const [prLoading, setPrLoading] = useState(false);
 
+  const [routineNameDraft, setRoutineNameDraft] = useState("");
+  const [savingRoutine, setSavingRoutine] = useState(false);
+  const [routineError, setRoutineError] = useState("");
+  // Routines belong to the coach's own account, not the client being
+  // viewed — a reusable program the coach can drop into any client's plan.
+  const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
+
   useEffect(() => {
     loadHistory();
     loadPersonalRecords();
@@ -2757,6 +2917,37 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       },
     ]);
     setBuilderOpen(true);
+  }
+
+  // Adds a saved routine's exercises into the builder — additive, like
+  // adding one exercise at a time from the library, so it never discards
+  // whatever's already been added for this client.
+  function loadRoutineIntoBuilder(routine) {
+    const groups = (routine.entries || []).map(hydrateExerciseEntry);
+    setWorkoutEntries((prev) => [...prev, ...groups]);
+    setBuilderOpen(true);
+  }
+
+  async function handleSaveRoutine() {
+    const name = routineNameDraft.trim();
+    if (!name) {
+      setRoutineError("Give this routine a name first.");
+      return;
+    }
+    if (workoutEntries.length === 0) {
+      setRoutineError("Add at least one exercise before saving it as a routine.");
+      return;
+    }
+    setSavingRoutine(true);
+    setRoutineError("");
+    try {
+      await saveAsRoutine(name, activeCategory, workoutEntries);
+      setRoutineNameDraft("");
+    } catch (err) {
+      setRoutineError(err.message || "Could not save this routine.");
+    } finally {
+      setSavingRoutine(false);
+    }
   }
 
   function addSet(groupId) {
@@ -3004,6 +3195,39 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
               </p>
               <WeightConverter />
 
+              {routines.length > 0 && (
+                <div className="mb-5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-2">
+                    Your routines
+                  </p>
+                  <ul className="divide-y divide-neutral-200 border border-neutral-200">
+                    {routines.map((r) => (
+                      <li key={r.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                        <button
+                          type="button"
+                          onClick={() => loadRoutineIntoBuilder(r)}
+                          className="flex-1 text-left"
+                        >
+                          <span className="text-sm text-neutral-800">{r.name}</span>
+                          <span className="ml-1.5 text-xs text-neutral-400">
+                            {abbreviateCategory(r.category)} · {(r.entries || []).length} exercise
+                            {(r.entries || []).length === 1 ? "" : "s"}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteRoutine(r.id)}
+                          aria-label={`Delete routine ${r.name}`}
+                          className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {workoutEntries.length === 0 ? (
                 <p className="text-sm text-neutral-500">
                   Search the exercise library below and click an exercise to add it here.
@@ -3227,6 +3451,28 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   </span>
                 )}
               </div>
+
+              {workoutEntries.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-neutral-100 flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={routineNameDraft}
+                    onChange={(e) => setRoutineNameDraft(e.target.value)}
+                    placeholder="Routine name"
+                    aria-label="Routine name"
+                    className="w-40 border border-neutral-300 px-2 py-2 text-sm"
+                  />
+                  <button
+                    type="button"
+                    disabled={savingRoutine}
+                    onClick={handleSaveRoutine}
+                    className="text-sm font-medium text-neutral-700 border border-neutral-300 px-3 py-2 hover:border-neutral-500 disabled:opacity-50"
+                  >
+                    {savingRoutine ? "Saving…" : "Save as routine"}
+                  </button>
+                  {routineError && <p className="w-full text-xs text-red-600">{routineError}</p>}
+                </div>
+              )}
             </div>
           )}
 
