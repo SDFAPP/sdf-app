@@ -802,6 +802,35 @@ function hydrateExerciseEntry(entry) {
   };
 }
 
+// Scans a client's workout history (newest first, as loadHistory already
+// returns it) for the most recent past day that logged this exercise, and
+// returns its hydrated sets for "previous performance" display/prefill.
+// excludeDate skips the day currently open in the builder itself, so
+// amending a past day doesn't show itself as its own "previous".
+function findPreviousPerformance(exerciseName, historyList, excludeDate) {
+  for (const w of historyList || []) {
+    if (excludeDate && w.workout_date === excludeDate) continue;
+    const groups = (w.entries || []).map(hydrateExerciseEntry);
+    const match = groups.find((g) => g.exercise === exerciseName);
+    if (match && match.sets.length > 0) {
+      return { date: w.workout_date, sets: match.sets };
+    }
+  }
+  return null;
+}
+
+// Compact "100x5 @7, 100x5" style summary of a previous-performance record.
+function formatPreviousSetsSummary(prev, isTimeBased) {
+  if (!prev) return "";
+  return prev.sets
+    .map((s) => {
+      const amount = isTimeBased ? (s.time ? `${s.time}s` : "") : (s.reps || "0");
+      const main = s.weight ? `${s.weight}×${amount}` : amount;
+      return s.rpe ? `${main} @${s.rpe}` : main;
+    })
+    .join(", ");
+}
+
 function formatRestClock(totalSeconds) {
   const s = Math.max(0, Math.round(totalSeconds));
   const m = Math.floor(s / 60);
@@ -1732,8 +1761,12 @@ function TrainingLog({ session, onLogout }) {
 
   function addExerciseToWorkout(name) {
     const isTimeBased = activeCategory === "Sprint Interval Training";
-    setWorkoutEntries((prev) => [
-      ...prev,
+    // Prefill the first set from last time this exercise was logged, so
+    // progressive overload is a one-glance decision instead of guesswork.
+    const prev = findPreviousPerformance(name, history, openWorkoutDate);
+    const lastSet = prev?.sets[0];
+    setWorkoutEntries((prevEntries) => [
+      ...prevEntries,
       {
         id: crypto.randomUUID(),
         exercise: name,
@@ -1742,9 +1775,9 @@ function TrainingLog({ session, onLogout }) {
         sets: [
           {
             id: crypto.randomUUID(),
-            weight: "",
-            reps: isTimeBased ? "" : "5",
-            time: isTimeBased ? "20" : "",
+            weight: lastSet?.weight ?? "",
+            reps: lastSet?.reps || (isTimeBased ? "" : "5"),
+            time: lastSet?.time || (isTimeBased ? "20" : ""),
             rpe: "",
             type: "normal",
             completed: false,
@@ -2063,12 +2096,19 @@ function TrainingLog({ session, onLogout }) {
               <div className="space-y-6">
                 {workoutEntries.map((group) => {
                   const isTimeBased = group.category === "Sprint Interval Training";
+                  const prev = findPreviousPerformance(group.exercise, history, openWorkoutDate);
                   return (
                     <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
                       <div className="flex items-center justify-between gap-3 mb-3">
                         <div>
                           <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
                           <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
+                          {prev && (
+                            <p className="text-xs text-neutral-400 mt-0.5">
+                              Last ({new Date(`${prev.date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}):{" "}
+                              {formatPreviousSetsSummary(prev, isTimeBased)}
+                            </p>
+                          )}
                         </div>
                         <div className="flex items-center gap-3 shrink-0">
                           <span className="flex items-center gap-1.5">
@@ -2575,8 +2615,12 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
 
   function addExerciseToWorkout(name) {
     const isTimeBased = activeCategory === "Sprint Interval Training";
-    setWorkoutEntries((prev) => [
-      ...prev,
+    // Prefill the first set from last time this exercise was logged, so
+    // the coach has a progressive-overload starting point, not a blank slate.
+    const prev = findPreviousPerformance(name, history, targetDate);
+    const lastSet = prev?.sets[0];
+    setWorkoutEntries((prevEntries) => [
+      ...prevEntries,
       {
         id: crypto.randomUUID(),
         exercise: name,
@@ -2585,9 +2629,9 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         sets: [
           {
             id: crypto.randomUUID(),
-            weight: "",
-            reps: isTimeBased ? "" : "5",
-            time: isTimeBased ? "20" : "",
+            weight: lastSet?.weight ?? "",
+            reps: lastSet?.reps || (isTimeBased ? "" : "5"),
+            time: lastSet?.time || (isTimeBased ? "20" : ""),
             rpe: "",
             type: "normal",
             completed: false,
@@ -2851,12 +2895,19 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                 <div className="space-y-6">
                   {workoutEntries.map((group) => {
                     const isTimeBased = group.category === "Sprint Interval Training";
+                    const prev = findPreviousPerformance(group.exercise, history, targetDate);
                     return (
                       <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
                         <div className="flex items-center justify-between gap-3 mb-3">
                           <div>
                             <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
                             <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
+                            {prev && (
+                              <p className="text-xs text-neutral-400 mt-0.5">
+                                Last ({new Date(`${prev.date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}):{" "}
+                                {formatPreviousSetsSummary(prev, isTimeBased)}
+                              </p>
+                            )}
                           </div>
                           <div className="flex items-center gap-3 shrink-0">
                             <span className="flex items-center gap-1.5">
