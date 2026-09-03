@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+﻿import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   User, UserPlus, ClipboardList, ArrowUpRight, Clock, XCircle,
   Play, Search, X, Plus, Trash2, LogOut, ArrowLeft, Users, ShieldCheck, Check,
@@ -781,6 +781,12 @@ function hydrateExerciseEntry(entry) {
       exercise: entry.exercise,
       category: entry.category,
       restMinutes: String(entry.restMinutes ?? entry.rest ?? "1"),
+      // Exercises sharing this id are a superset/circuit performed
+      // back-to-back — rest only fires after the last one in the group,
+      // not after each individual exercise. Passed through as-is (not
+      // regenerated) so entries that shared an id in the saved JSON still
+      // share it after hydration.
+      supersetId: entry.supersetId || null,
       sets: entry.sets.map((s) => ({
         id: crypto.randomUUID(),
         weight: s.weight ?? "",
@@ -799,6 +805,7 @@ function hydrateExerciseEntry(entry) {
     exercise: entry.exercise,
     category: entry.category,
     restMinutes: String(entry.rest ?? "1"),
+    supersetId: null,
     sets: Array.from({ length: count }, () => ({
       id: crypto.randomUUID(),
       weight: entry.weight ?? "",
@@ -810,6 +817,26 @@ function hydrateExerciseEntry(entry) {
       completedAt: null,
     })),
   };
+}
+
+// Groups exercise entries into display "blocks" for the builder: a run of
+// entries sharing a supersetId becomes one superset block (in order of that
+// id's first appearance), everything else stays its own single-exercise
+// block. Doesn't reorder the underlying array — members can be scattered
+// (e.g. added out of order) and still render together.
+function groupWorkoutEntriesForDisplay(entries) {
+  const blocks = [];
+  const seen = new Set();
+  for (const g of entries) {
+    if (g.supersetId) {
+      if (seen.has(g.supersetId)) continue;
+      seen.add(g.supersetId);
+      blocks.push({ type: "superset", supersetId: g.supersetId, members: entries.filter((e) => e.supersetId === g.supersetId) });
+    } else {
+      blocks.push({ type: "single", group: g });
+    }
+  }
+  return blocks;
 }
 
 // Scans a client's workout history (newest first, as loadHistory already
@@ -1784,6 +1811,235 @@ function MeasurementsSection({ measurements, measurementsLoading, addMeasurement
   );
 }
 
+// One exercise's card in the builder: header (name, category, "last time",
+// superset control, rest, remove) plus its per-set rows. Shared by
+// TrainingLog and ClientWorkspace so the two never drift apart the way the
+// old duplicated JSX did. `bordered` is false when nested inside a
+// superset's own box (which already provides the visual grouping).
+function ExerciseGroupCard({
+  group, isTimeBased, prev, unitLabel,
+  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
+  supersetOptions, onSupersetChange, bordered = true,
+}) {
+  return (
+    <div className={bordered ? "border-b border-neutral-100 pb-5 last:border-0 last:pb-0" : ""}>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
+          <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
+          {prev && (
+            <p className="text-xs text-neutral-400 mt-0.5">
+              Last ({new Date(`${prev.date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}):{" "}
+              {formatPreviousSetsSummary(prev, isTimeBased)}
+            </p>
+          )}
+          <select
+            value={group.supersetId || ""}
+            onChange={(e) => onSupersetChange(group.id, e.target.value)}
+            aria-label={`Superset grouping for ${group.exercise}`}
+            className="mt-1.5 text-xs border border-neutral-300 px-1.5 py-1 text-neutral-500"
+          >
+            <option value="">Not in a superset</option>
+            {supersetOptions.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-center gap-3 shrink-0">
+          <span className="flex items-center gap-1.5">
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.5"
+              value={group.restMinutes}
+              onChange={(e) => updateGroupField(group.id, "restMinutes", e.target.value)}
+              aria-label={`Rest in minutes for ${group.exercise}`}
+              className="w-14 border border-neutral-300 px-2 py-1.5 text-sm"
+            />
+            <span className="text-xs text-neutral-400">min rest</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => removeExerciseGroup(group.id)}
+            aria-label={`Remove ${group.exercise}`}
+            className="text-neutral-400 hover:text-red-600 p-1"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        {group.sets.map((s, i) => (
+          <div
+            key={s.id}
+            className={`flex flex-wrap items-center gap-2 p-2 border ${
+              s.completed ? "bg-emerald-50 border-emerald-200" : "border-neutral-200"
+            }`}
+          >
+            <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
+            <select
+              value={s.type}
+              onChange={(e) => updateSet(group.id, s.id, "type", e.target.value)}
+              aria-label={`Set type for set ${i + 1} of ${group.exercise}`}
+              className={`text-xs border px-1.5 py-2 sm:py-1.5 shrink-0 ${SET_TYPE_STYLES[s.type]}`}
+            >
+              {SET_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={s.weight}
+              onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
+              placeholder={`Weight (${unitLabel})`}
+              aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
+              className="w-20 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+            />
+            {isTimeBased ? (
+              <input
+                type="number"
+                inputMode="numeric"
+                value={s.time}
+                onChange={(e) => updateSet(group.id, s.id, "time", e.target.value)}
+                placeholder="Sec"
+                aria-label={`Sprint time for set ${i + 1} of ${group.exercise}`}
+                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+              />
+            ) : (
+              <input
+                type="number"
+                inputMode="numeric"
+                value={s.reps}
+                onChange={(e) => updateSet(group.id, s.id, "reps", e.target.value)}
+                placeholder="Reps"
+                aria-label={`Reps for set ${i + 1} of ${group.exercise}`}
+                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+              />
+            )}
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.5"
+              min="6"
+              max="10"
+              value={s.rpe}
+              onChange={(e) => updateSet(group.id, s.id, "rpe", e.target.value)}
+              placeholder="RPE"
+              aria-label={`RPE for set ${i + 1} of ${group.exercise}`}
+              className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => toggleSetComplete(group.id, s.id)}
+              aria-pressed={s.completed}
+              aria-label={
+                s.completed
+                  ? `Mark set ${i + 1} of ${group.exercise} incomplete`
+                  : `Mark set ${i + 1} of ${group.exercise} complete`
+              }
+              className={`ml-auto shrink-0 w-9 h-9 flex items-center justify-center border ${
+                s.completed
+                  ? "bg-emerald-600 border-emerald-600 text-white"
+                  : "border-neutral-300 text-neutral-300 hover:border-neutral-500"
+              }`}
+            >
+              <Check size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={() => removeSet(group.id, s.id)}
+              aria-label={`Remove set ${i + 1} of ${group.exercise}`}
+              className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => addSet(group.id)}
+        className="mt-2 flex items-center gap-1 text-xs font-medium text-neutral-600 hover:text-neutral-900"
+      >
+        <Plus size={12} /> Add set
+      </button>
+    </div>
+  );
+}
+
+// Renders a workout's exercise groups as superset-aware blocks — a run of
+// linked exercises gets wrapped together with a "Superset A" label; a
+// standalone exercise renders as before. Shared by TrainingLog and
+// ClientWorkspace, since both need identical superset behaviour.
+function WorkoutBuilderGroups({
+  workoutEntries, history, openDate, unitLabel,
+  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete, setGroupSuperset,
+}) {
+  const blocks = groupWorkoutEntriesForDisplay(workoutEntries);
+  const existingSupersetIds = [...new Set(workoutEntries.map((g) => g.supersetId).filter(Boolean))];
+  const supersetLetters = {};
+  existingSupersetIds.forEach((id, i) => {
+    supersetLetters[id] = String.fromCharCode(65 + i);
+  });
+  function optionsFor(group) {
+    const opts = [];
+    // The group's own current superset (if any) needs its own <option> so
+    // the <select>'s value actually matches a real option — otherwise the
+    // browser silently falls back to the first option regardless of what
+    // React's value prop says.
+    if (group.supersetId) {
+      opts.push({ value: group.supersetId, label: `Superset ${supersetLetters[group.supersetId]}` });
+    } else {
+      opts.push({ value: "__new__", label: "Start a superset" });
+    }
+    existingSupersetIds
+      .filter((id) => id !== group.supersetId)
+      .forEach((id) => opts.push({ value: id, label: `Join Superset ${supersetLetters[id]}` }));
+    return opts;
+  }
+  function cardFor(group) {
+    return (
+      <ExerciseGroupCard
+        key={group.id}
+        group={group}
+        isTimeBased={isTimeBasedCategory(group.category)}
+        prev={findPreviousPerformance(group.exercise, history, openDate)}
+        unitLabel={unitLabel}
+        updateGroupField={updateGroupField}
+        removeExerciseGroup={removeExerciseGroup}
+        addSet={addSet}
+        updateSet={updateSet}
+        removeSet={removeSet}
+        toggleSetComplete={toggleSetComplete}
+        supersetOptions={optionsFor(group)}
+        onSupersetChange={setGroupSuperset}
+        bordered={false}
+      />
+    );
+  }
+  return (
+    <div className="space-y-6">
+      {blocks.map((block) =>
+        block.type === "single" ? (
+          <div key={block.group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
+            {cardFor(block.group)}
+          </div>
+        ) : (
+          <div key={block.supersetId} className="border border-neutral-300 bg-neutral-50 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 mb-3">
+              Superset {supersetLetters[block.supersetId]}
+            </p>
+            <div className="space-y-4">{block.members.map(cardFor)}</div>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 function ProfileModal({ session, profile, onClose, onSaved }) {
   const [units, setUnits] = useState(profile.measurement_system === "imperial" ? "imperial" : "metric");
   const [weight, setWeight] = useState(kgToDisplay(profile.weight_kg, units));
@@ -2185,6 +2441,7 @@ function TrainingLog({ session, onLogout }) {
         exercise: name,
         category: activeCategory,
         restMinutes: isTimeBased ? "3" : "1",
+        supersetId: null,
         sets: [
           {
             id: crypto.randomUUID(),
@@ -2200,6 +2457,34 @@ function TrainingLog({ session, onLogout }) {
       },
     ]);
     setBuilderOpen(true);
+  }
+
+  // Links/unlinks a group into a superset. "" clears it; "__new__" starts a
+  // fresh superset with just this group (a transient state — it renders as
+  // a normal single exercise until a second one joins); any other value is
+  // an existing supersetId to join. Any superset left with under 2 members
+  // afterward auto-collapses back to standalone so a stray "Superset A"
+  // label never survives its last exercise leaving.
+  function setGroupSuperset(groupId, value) {
+    setWorkoutEntries((prev) => {
+      let next = prev.map((g) => {
+        if (g.id !== groupId) return g;
+        if (value === "") return { ...g, supersetId: null };
+        if (value === "__new__") return { ...g, supersetId: crypto.randomUUID() };
+        return { ...g, supersetId: value };
+      });
+      // Only collapse on an explicit unlink — a freshly started superset
+      // legitimately has just one member until a partner joins it, and
+      // must survive that moment rather than being purged immediately.
+      if (value === "") {
+        const counts = {};
+        next.forEach((g) => {
+          if (g.supersetId) counts[g.supersetId] = (counts[g.supersetId] || 0) + 1;
+        });
+        next = next.map((g) => (g.supersetId && counts[g.supersetId] < 2 ? { ...g, supersetId: null } : g));
+      }
+      return next;
+    });
   }
 
   // Adds a saved routine's exercises into the builder — additive, like
@@ -2282,7 +2567,12 @@ function TrainingLog({ session, onLogout }) {
             }
       )
     );
-    if (nowCompleted) {
+    // In a superset, rest only fires after the last exercise in the round —
+    // completing set 1 of A1 shouldn't rest before A2 has even happened.
+    const isLastInSuperset =
+      !group.supersetId ||
+      workoutEntries.filter((g) => g.supersetId === group.supersetId).slice(-1)[0]?.id === groupId;
+    if (nowCompleted && isLastInSuperset) {
       const restSeconds = Math.round((Number(group.restMinutes) || 0) * 60);
       if (restSeconds > 0) startRestTimer(restSeconds, group.exercise);
     }
@@ -2570,148 +2860,19 @@ function TrainingLog({ session, onLogout }) {
                 Search the exercise library below (use the category tabs above to browse) and click an exercise to add it here.
               </p>
             ) : (
-              <div className="space-y-6">
-                {workoutEntries.map((group) => {
-                  const isTimeBased = isTimeBasedCategory(group.category);
-                  const prev = findPreviousPerformance(group.exercise, history, openWorkoutDate);
-                  return (
-                    <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
-                      <div className="flex items-center justify-between gap-3 mb-3">
-                        <div>
-                          <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
-                          <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
-                          {prev && (
-                            <p className="text-xs text-neutral-400 mt-0.5">
-                              Last ({new Date(`${prev.date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}):{" "}
-                              {formatPreviousSetsSummary(prev, isTimeBased)}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 shrink-0">
-                          <span className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              inputMode="decimal"
-                              step="0.5"
-                              value={group.restMinutes}
-                              onChange={(e) => updateGroupField(group.id, "restMinutes", e.target.value)}
-                              aria-label={`Rest in minutes for ${group.exercise}`}
-                              className="w-14 border border-neutral-300 px-2 py-1.5 text-sm"
-                            />
-                            <span className="text-xs text-neutral-400">min rest</span>
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => removeExerciseGroup(group.id)}
-                            aria-label={`Remove ${group.exercise}`}
-                            className="text-neutral-400 hover:text-red-600 p-1"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        {group.sets.map((s, i) => (
-                          <div
-                            key={s.id}
-                            className={`flex flex-wrap items-center gap-2 p-2 border ${
-                              s.completed ? "bg-emerald-50 border-emerald-200" : "border-neutral-200"
-                            }`}
-                          >
-                            <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
-                            <select
-                              value={s.type}
-                              onChange={(e) => updateSet(group.id, s.id, "type", e.target.value)}
-                              aria-label={`Set type for set ${i + 1} of ${group.exercise}`}
-                              className={`text-xs border px-1.5 py-2 sm:py-1.5 shrink-0 ${SET_TYPE_STYLES[s.type]}`}
-                            >
-                              {SET_TYPES.map((t) => (
-                                <option key={t.value} value={t.value}>{t.label}</option>
-                              ))}
-                            </select>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              value={s.weight}
-                              onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
-                              placeholder={`Weight (${unitLabel})`}
-                              aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
-                              className="w-20 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                            />
-                            {isTimeBased ? (
-                              <input
-                                type="number"
-                                inputMode="numeric"
-                                value={s.time}
-                                onChange={(e) => updateSet(group.id, s.id, "time", e.target.value)}
-                                placeholder="Sec"
-                                aria-label={`Sprint time for set ${i + 1} of ${group.exercise}`}
-                                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                              />
-                            ) : (
-                              <input
-                                type="number"
-                                inputMode="numeric"
-                                value={s.reps}
-                                onChange={(e) => updateSet(group.id, s.id, "reps", e.target.value)}
-                                placeholder="Reps"
-                                aria-label={`Reps for set ${i + 1} of ${group.exercise}`}
-                                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                              />
-                            )}
-                            <input
-                              type="number"
-                              inputMode="decimal"
-                              step="0.5"
-                              min="6"
-                              max="10"
-                              value={s.rpe}
-                              onChange={(e) => updateSet(group.id, s.id, "rpe", e.target.value)}
-                              placeholder="RPE"
-                              aria-label={`RPE for set ${i + 1} of ${group.exercise}`}
-                              className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => toggleSetComplete(group.id, s.id)}
-                              aria-pressed={s.completed}
-                              aria-label={
-                                s.completed
-                                  ? `Mark set ${i + 1} of ${group.exercise} incomplete`
-                                  : `Mark set ${i + 1} of ${group.exercise} complete`
-                              }
-                              className={`ml-auto shrink-0 w-9 h-9 flex items-center justify-center border ${
-                                s.completed
-                                  ? "bg-emerald-600 border-emerald-600 text-white"
-                                  : "border-neutral-300 text-neutral-300 hover:border-neutral-500"
-                              }`}
-                            >
-                              <Check size={16} />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => removeSet(group.id, s.id)}
-                              aria-label={`Remove set ${i + 1} of ${group.exercise}`}
-                              className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
-                            >
-                              <X size={14} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => addSet(group.id)}
-                        className="mt-2 flex items-center gap-1 text-xs font-medium text-neutral-600 hover:text-neutral-900"
-                      >
-                        <Plus size={12} /> Add set
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+              <WorkoutBuilderGroups
+                workoutEntries={workoutEntries}
+                history={history}
+                openDate={openWorkoutDate}
+                unitLabel={unitLabel}
+                updateGroupField={updateGroupField}
+                removeExerciseGroup={removeExerciseGroup}
+                addSet={addSet}
+                updateSet={updateSet}
+                removeSet={removeSet}
+                toggleSetComplete={toggleSetComplete}
+                setGroupSuperset={setGroupSuperset}
+              />
             )}
 
             {saveError && <p className="mt-3 text-sm text-red-600">{saveError}</p>}
@@ -3231,6 +3392,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         exercise: name,
         category: activeCategory,
         restMinutes: isTimeBased ? "3" : "1",
+        supersetId: null,
         sets: [
           {
             id: crypto.randomUUID(),
@@ -3246,6 +3408,30 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       },
     ]);
     setBuilderOpen(true);
+  }
+
+  // Links/unlinks a group into a superset — see the identical helper in
+  // TrainingLog for the full explanation of "" / "__new__" / an id.
+  function setGroupSuperset(groupId, value) {
+    setWorkoutEntries((prev) => {
+      let next = prev.map((g) => {
+        if (g.id !== groupId) return g;
+        if (value === "") return { ...g, supersetId: null };
+        if (value === "__new__") return { ...g, supersetId: crypto.randomUUID() };
+        return { ...g, supersetId: value };
+      });
+      // Only collapse on an explicit unlink — a freshly started superset
+      // legitimately has just one member until a partner joins it, and
+      // must survive that moment rather than being purged immediately.
+      if (value === "") {
+        const counts = {};
+        next.forEach((g) => {
+          if (g.supersetId) counts[g.supersetId] = (counts[g.supersetId] || 0) + 1;
+        });
+        next = next.map((g) => (g.supersetId && counts[g.supersetId] < 2 ? { ...g, supersetId: null } : g));
+      }
+      return next;
+    });
   }
 
   // Adds a saved routine's exercises into the builder — additive, like
@@ -3562,148 +3748,19 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   Search the exercise library below and click an exercise to add it here.
                 </p>
               ) : (
-                <div className="space-y-6">
-                  {workoutEntries.map((group) => {
-                    const isTimeBased = isTimeBasedCategory(group.category);
-                    const prev = findPreviousPerformance(group.exercise, history, targetDate);
-                    return (
-                      <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
-                        <div className="flex items-center justify-between gap-3 mb-3">
-                          <div>
-                            <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
-                            <span className="ml-1.5 text-xs text-neutral-400">{abbreviateCategory(group.category)}</span>
-                            {prev && (
-                              <p className="text-xs text-neutral-400 mt-0.5">
-                                Last ({new Date(`${prev.date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}):{" "}
-                                {formatPreviousSetsSummary(prev, isTimeBased)}
-                              </p>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-3 shrink-0">
-                            <span className="flex items-center gap-1.5">
-                              <input
-                                type="number"
-                                inputMode="decimal"
-                                step="0.5"
-                                value={group.restMinutes}
-                                onChange={(e) => updateGroupField(group.id, "restMinutes", e.target.value)}
-                                aria-label={`Rest in minutes for ${group.exercise}`}
-                                className="w-14 border border-neutral-300 px-2 py-1.5 text-sm"
-                              />
-                              <span className="text-xs text-neutral-400">min rest</span>
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => removeExerciseGroup(group.id)}
-                              aria-label={`Remove ${group.exercise}`}
-                              className="text-neutral-400 hover:text-red-600 p-1"
-                            >
-                              <Trash2 size={16} />
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          {group.sets.map((s, i) => (
-                            <div
-                              key={s.id}
-                              className={`flex flex-wrap items-center gap-2 p-2 border ${
-                                s.completed ? "bg-emerald-50 border-emerald-200" : "border-neutral-200"
-                              }`}
-                            >
-                              <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
-                              <select
-                                value={s.type}
-                                onChange={(e) => updateSet(group.id, s.id, "type", e.target.value)}
-                                aria-label={`Set type for set ${i + 1} of ${group.exercise}`}
-                                className={`text-xs border px-1.5 py-2 sm:py-1.5 shrink-0 ${SET_TYPE_STYLES[s.type]}`}
-                              >
-                                {SET_TYPES.map((t) => (
-                                  <option key={t.value} value={t.value}>{t.label}</option>
-                                ))}
-                              </select>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                value={s.weight}
-                                onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
-                                placeholder={`Weight (${unitLabel})`}
-                                aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
-                                className="w-20 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                              />
-                              {isTimeBased ? (
-                                <input
-                                  type="number"
-                                  inputMode="numeric"
-                                  value={s.time}
-                                  onChange={(e) => updateSet(group.id, s.id, "time", e.target.value)}
-                                  placeholder="Sec"
-                                  aria-label={`Sprint time for set ${i + 1} of ${group.exercise}`}
-                                  className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                                />
-                              ) : (
-                                <input
-                                  type="number"
-                                  inputMode="numeric"
-                                  value={s.reps}
-                                  onChange={(e) => updateSet(group.id, s.id, "reps", e.target.value)}
-                                  placeholder="Reps"
-                                  aria-label={`Reps for set ${i + 1} of ${group.exercise}`}
-                                  className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                                />
-                              )}
-                              <input
-                                type="number"
-                                inputMode="decimal"
-                                step="0.5"
-                                min="6"
-                                max="10"
-                                value={s.rpe}
-                                onChange={(e) => updateSet(group.id, s.id, "rpe", e.target.value)}
-                                placeholder="RPE"
-                                aria-label={`RPE for set ${i + 1} of ${group.exercise}`}
-                                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => toggleSetComplete(group.id, s.id)}
-                                aria-pressed={s.completed}
-                                aria-label={
-                                  s.completed
-                                    ? `Mark set ${i + 1} of ${group.exercise} incomplete`
-                                    : `Mark set ${i + 1} of ${group.exercise} complete`
-                                }
-                                className={`ml-auto shrink-0 w-9 h-9 flex items-center justify-center border ${
-                                  s.completed
-                                    ? "bg-emerald-600 border-emerald-600 text-white"
-                                    : "border-neutral-300 text-neutral-300 hover:border-neutral-500"
-                                }`}
-                              >
-                                <Check size={16} />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => removeSet(group.id, s.id)}
-                                aria-label={`Remove set ${i + 1} of ${group.exercise}`}
-                                className="text-neutral-300 hover:text-red-600 p-1 shrink-0"
-                              >
-                                <X size={14} />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => addSet(group.id)}
-                          className="mt-2 flex items-center gap-1 text-xs font-medium text-neutral-600 hover:text-neutral-900"
-                        >
-                          <Plus size={12} /> Add set
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
+                <WorkoutBuilderGroups
+                  workoutEntries={workoutEntries}
+                  history={history}
+                  openDate={targetDate}
+                  unitLabel={unitLabel}
+                  updateGroupField={updateGroupField}
+                  removeExerciseGroup={removeExerciseGroup}
+                  addSet={addSet}
+                  updateSet={updateSet}
+                  removeSet={removeSet}
+                  toggleSetComplete={toggleSetComplete}
+                  setGroupSuperset={setGroupSuperset}
+                />
               )}
 
               <div className="relative mt-4 mb-3">
