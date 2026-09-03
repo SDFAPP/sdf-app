@@ -728,6 +728,16 @@ function abbreviateCategory(cat) {
   return CATEGORY_ABBREVIATIONS[cat] || cat;
 }
 
+// Which categories log a duration per set (e.g. "20 sec sprint") instead of
+// a rep count. The metric is decided by the training modality/category, not
+// the exercise itself — a kettlebell swing is timed in a SIT session but
+// rep-counted in a strength session. Centralised here so adding another
+// time-based category later is a one-line change, not a file-wide hunt.
+const TIME_BASED_CATEGORIES = ["Sprint Interval Training"];
+function isTimeBasedCategory(category) {
+  return TIME_BASED_CATEGORIES.includes(category);
+}
+
 // ------------------------------------------------------------
 // Per-set logging: each exercise in a workout holds an array of
 // individual sets (own weight/reps/RPE/tag/completion), matching how
@@ -829,6 +839,33 @@ function formatPreviousSetsSummary(prev, isTimeBased) {
       return s.rpe ? `${main} @${s.rpe}` : main;
     })
     .join(", ");
+}
+
+// Personal records: for each exercise, the best set ever completed by
+// estimated 1-rep max (Epley formula: weight * (1 + reps/30)). Warm-up and
+// drop sets are excluded since they're not a genuine effort at that load;
+// bodyweight/time-based sets (no numeric weight) don't have a meaningful
+// 1RM so they're skipped too. `workoutsList` should be completed workouts
+// only — pass whatever range of history you want PRs computed over.
+function computePersonalRecords(workoutsList) {
+  const best = {};
+  for (const w of workoutsList || []) {
+    const groups = (w.entries || []).map(hydrateExerciseEntry);
+    for (const g of groups) {
+      for (const s of g.sets) {
+        if (s.type === "warmup" || s.type === "drop") continue;
+        const weight = Number(s.weight);
+        const reps = Number(s.reps);
+        if (!(weight > 0) || !Number.isInteger(reps) || reps <= 0) continue;
+        const estOneRm = weight * (1 + reps / 30);
+        const current = best[g.exercise];
+        if (!current || estOneRm > current.estOneRm) {
+          best[g.exercise] = { estOneRm, weight, reps, date: w.workout_date, category: g.category };
+        }
+      }
+    }
+  }
+  return best;
 }
 
 function formatRestClock(totalSeconds) {
@@ -1646,6 +1683,9 @@ function TrainingLog({ session, onLogout }) {
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
 
+  const [personalRecords, setPersonalRecords] = useState({});
+  const [prLoading, setPrLoading] = useState(false);
+
   const {
     restActive, restRemaining, restLabel, restPaused,
     startRestTimer, adjustRestTimer, pauseResumeRestTimer, skipRestTimer,
@@ -1674,7 +1714,27 @@ function TrainingLog({ session, onLogout }) {
   useEffect(() => {
     loadToday();
     loadHistory();
+    loadPersonalRecords();
   }, []);
+
+  // PRs are computed client-side from every completed workout, not just the
+  // last 10 days shown in history — a 200-day cap comfortably covers a
+  // year-plus of consistent training without pulling the whole table.
+  async function loadPersonalRecords() {
+    setPrLoading(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${session.user.id}&status=eq.completed&select=workout_date,entries&order=workout_date.desc&limit=200`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      setPersonalRecords(computePersonalRecords(await res.json()));
+    } catch {
+      // PRs just won't show — not worth surfacing an error for a nice-to-have.
+    } finally {
+      setPrLoading(false);
+    }
+  }
 
   async function loadToday() {
     try {
@@ -1760,7 +1820,7 @@ function TrainingLog({ session, onLogout }) {
   }
 
   function addExerciseToWorkout(name) {
-    const isTimeBased = activeCategory === "Sprint Interval Training";
+    const isTimeBased = isTimeBasedCategory(activeCategory);
     // Prefill the first set from last time this exercise was logged, so
     // progressive overload is a one-glance decision instead of guesswork.
     const prev = findPreviousPerformance(name, history, openWorkoutDate);
@@ -1859,7 +1919,7 @@ function TrainingLog({ session, onLogout }) {
         return;
       }
       for (const s of group.sets) {
-        if (group.category === "Sprint Interval Training") {
+        if (isTimeBasedCategory(group.category)) {
           const time = Number(s.time);
           if (!Number.isInteger(time) || time <= 0) {
             setSaveError(`Enter a valid sprint time for every set of ${group.exercise}.`);
@@ -1933,6 +1993,7 @@ function TrainingLog({ session, onLogout }) {
       // A day other than today was just amended — refresh the history list
       // so its summary/status reflects the change.
       if (openWorkoutDate !== new Date().toISOString().slice(0, 10)) loadHistory();
+      loadPersonalRecords();
     } catch (err) {
       setSaveError(err.message || "Something went wrong saving this workout.");
     } finally {
@@ -2095,7 +2156,7 @@ function TrainingLog({ session, onLogout }) {
             ) : (
               <div className="space-y-6">
                 {workoutEntries.map((group) => {
-                  const isTimeBased = group.category === "Sprint Interval Training";
+                  const isTimeBased = isTimeBasedCategory(group.category);
                   const prev = findPreviousPerformance(group.exercise, history, openWorkoutDate);
                   return (
                     <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
@@ -2333,6 +2394,39 @@ function TrainingLog({ session, onLogout }) {
 
         <div className="mt-10 border-b border-neutral-300" />
 
+        <div className="mt-6">
+          <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
+            Personal records
+          </p>
+          {prLoading ? (
+            <p className="text-sm text-neutral-400">Loading…</p>
+          ) : Object.keys(personalRecords).length === 0 ? (
+            <p className="text-sm text-neutral-500">
+              Log weight and reps on a completed set to start tracking your PRs here.
+            </p>
+          ) : (
+            <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
+              {Object.entries(personalRecords)
+                .sort((a, b) => a[0].localeCompare(b[0]))
+                .map(([exercise, r]) => (
+                  <li key={exercise} className="flex items-center justify-between gap-3 px-4 py-3">
+                    <span className="text-sm text-neutral-800">
+                      {exercise}
+                      <span className="block text-xs text-neutral-400">
+                        {r.weight}{unitLabel} × {r.reps} · est. 1RM {Math.round(r.estOneRm * 10) / 10}{unitLabel}
+                      </span>
+                    </span>
+                    <span className="text-xs text-neutral-400 shrink-0">
+                      {new Date(r.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                    </span>
+                  </li>
+                ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="mt-10 border-b border-neutral-300" />
+
         <div className="mt-6 pb-16">
           <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
             Exercise library
@@ -2561,8 +2655,12 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
 
   const [search, setSearch] = useState("");
 
+  const [personalRecords, setPersonalRecords] = useState({});
+  const [prLoading, setPrLoading] = useState(false);
+
   useEffect(() => {
     loadHistory();
+    loadPersonalRecords();
   }, []);
 
   // Re-load whichever day is selected so the coach edits that day's actual
@@ -2570,6 +2668,24 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   useEffect(() => {
     loadDay(targetDate);
   }, [targetDate]);
+
+  // PRs computed client-side from this client's completed workouts, same as
+  // the client's own TrainingLog — lets the coach see progress at a glance.
+  async function loadPersonalRecords() {
+    setPrLoading(true);
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/workouts?client_id=eq.${client.id}&status=eq.completed&select=workout_date,entries&order=workout_date.desc&limit=200`,
+        { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
+      );
+      if (!res.ok) return;
+      setPersonalRecords(computePersonalRecords(await res.json()));
+    } catch {
+      // PRs just won't show — not worth surfacing an error for a nice-to-have.
+    } finally {
+      setPrLoading(false);
+    }
+  }
 
   async function loadDay(date) {
     setBuilderOpen(false);
@@ -2614,7 +2730,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   }
 
   function addExerciseToWorkout(name) {
-    const isTimeBased = activeCategory === "Sprint Interval Training";
+    const isTimeBased = isTimeBasedCategory(activeCategory);
     // Prefill the first set from last time this exercise was logged, so
     // the coach has a progressive-overload starting point, not a blank slate.
     const prev = findPreviousPerformance(name, history, targetDate);
@@ -2704,7 +2820,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         return;
       }
       for (const s of group.sets) {
-        if (group.category === "Sprint Interval Training") {
+        if (isTimeBasedCategory(group.category)) {
           const time = Number(s.time);
           if (!Number.isInteger(time) || time <= 0) {
             setSaveError(`Enter a valid sprint time for every set of ${group.exercise}.`);
@@ -2776,6 +2892,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         setWorkoutStatus(rows[0].status);
       }
       loadHistory();
+      loadPersonalRecords();
     } catch (err) {
       setSaveError(err.message || "Something went wrong assigning this workout.");
     } finally {
@@ -2894,7 +3011,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
               ) : (
                 <div className="space-y-6">
                   {workoutEntries.map((group) => {
-                    const isTimeBased = group.category === "Sprint Interval Training";
+                    const isTimeBased = isTimeBasedCategory(group.category);
                     const prev = findPreviousPerformance(group.exercise, history, targetDate);
                     return (
                       <div key={group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
@@ -3148,6 +3265,35 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                     </li>
                   );
                 })}
+              </ul>
+            )}
+          </div>
+
+          <div className="mt-6 border-t border-neutral-100 pt-5">
+            <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-2">
+              Personal records
+            </p>
+            {prLoading ? (
+              <p className="text-sm text-neutral-400">Loading…</p>
+            ) : Object.keys(personalRecords).length === 0 ? (
+              <p className="text-sm text-neutral-500">No PRs yet — logged sets need weight and reps to count.</p>
+            ) : (
+              <ul className="divide-y divide-neutral-200 border border-neutral-200 bg-white">
+                {Object.entries(personalRecords)
+                  .sort((a, b) => a[0].localeCompare(b[0]))
+                  .map(([exercise, r]) => (
+                    <li key={exercise} className="flex items-center justify-between gap-3 px-4 py-3">
+                      <span className="text-sm text-neutral-800">
+                        {exercise}
+                        <span className="block text-xs text-neutral-400">
+                          {r.weight}{unitLabel} × {r.reps} · est. 1RM {Math.round(r.estOneRm * 10) / 10}{unitLabel}
+                        </span>
+                      </span>
+                      <span className="text-xs text-neutral-400 shrink-0">
+                        {new Date(r.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </span>
+                    </li>
+                  ))}
               </ul>
             )}
           </div>
