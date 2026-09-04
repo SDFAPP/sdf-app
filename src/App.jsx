@@ -740,9 +740,14 @@ function isTimeBasedCategory(category) {
 
 // ------------------------------------------------------------
 // Per-set logging: each exercise in a workout holds an array of
-// individual sets (own weight/reps/RPE/tag/completion), matching how
-// people actually train — set 3 might be lighter than set 1, or the
-// last one taken to failure.
+// individual sets (own weight/reps/RPE/completion), matching how people
+// actually train — set 3 might be lighter than set 1.
+//
+// Every set still carries a `type` field internally, always "normal" —
+// there's no UI to change it. Kept (rather than removed outright) so old
+// saved workouts from before this decision, which may have "warmup"/
+// "drop"/"failure" values, still load, export, and compute PRs/volume
+// correctly; SET_TYPES only remains for that CSV label lookup.
 // ------------------------------------------------------------
 const SET_TYPES = [
   { value: "normal", label: "Normal" },
@@ -750,12 +755,6 @@ const SET_TYPES = [
   { value: "drop", label: "Drop set" },
   { value: "failure", label: "Failure" },
 ];
-const SET_TYPE_STYLES = {
-  normal: "border-neutral-300 text-neutral-700 bg-white",
-  warmup: "border-amber-300 text-amber-700 bg-amber-50",
-  drop: "border-purple-300 text-purple-700 bg-purple-50",
-  failure: "border-red-300 text-red-700 bg-red-50",
-};
 
 function newSet(prevSet) {
   return {
@@ -781,12 +780,6 @@ function hydrateExerciseEntry(entry) {
       exercise: entry.exercise,
       category: entry.category,
       restMinutes: String(entry.restMinutes ?? entry.rest ?? "1"),
-      // Exercises sharing this id are a superset/circuit performed
-      // back-to-back — rest only fires after the last one in the group,
-      // not after each individual exercise. Passed through as-is (not
-      // regenerated) so entries that shared an id in the saved JSON still
-      // share it after hydration.
-      supersetId: entry.supersetId || null,
       sets: entry.sets.map((s) => ({
         id: crypto.randomUUID(),
         weight: s.weight ?? "",
@@ -805,7 +798,6 @@ function hydrateExerciseEntry(entry) {
     exercise: entry.exercise,
     category: entry.category,
     restMinutes: String(entry.rest ?? "1"),
-    supersetId: null,
     sets: Array.from({ length: count }, () => ({
       id: crypto.randomUUID(),
       weight: entry.weight ?? "",
@@ -817,26 +809,6 @@ function hydrateExerciseEntry(entry) {
       completedAt: null,
     })),
   };
-}
-
-// Groups exercise entries into display "blocks" for the builder: a run of
-// entries sharing a supersetId becomes one superset block (in order of that
-// id's first appearance), everything else stays its own single-exercise
-// block. Doesn't reorder the underlying array — members can be scattered
-// (e.g. added out of order) and still render together.
-function groupWorkoutEntriesForDisplay(entries) {
-  const blocks = [];
-  const seen = new Set();
-  for (const g of entries) {
-    if (g.supersetId) {
-      if (seen.has(g.supersetId)) continue;
-      seen.add(g.supersetId);
-      blocks.push({ type: "superset", supersetId: g.supersetId, members: entries.filter((e) => e.supersetId === g.supersetId) });
-    } else {
-      blocks.push({ type: "single", group: g });
-    }
-  }
-  return blocks;
 }
 
 // Scans a client's workout history (newest first, as loadHistory already
@@ -2001,17 +1973,15 @@ function MeasurementsSection({ measurements, measurementsLoading, addMeasurement
 }
 
 // One exercise's card in the builder: header (name, category, "last time",
-// superset control, rest, remove) plus its per-set rows. Shared by
-// TrainingLog and ClientWorkspace so the two never drift apart the way the
-// old duplicated JSX did. `bordered` is false when nested inside a
-// superset's own box (which already provides the visual grouping).
+// rest, remove) plus its per-set rows. Shared by TrainingLog and
+// ClientWorkspace so the two never drift apart the way the old duplicated
+// JSX did.
 function ExerciseGroupCard({
   group, isTimeBased, prev, unitLabel,
   updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
-  supersetOptions, onSupersetChange, bordered = true,
 }) {
   return (
-    <div className={bordered ? "border-b border-neutral-100 pb-5 last:border-0 last:pb-0" : ""}>
+    <div className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
       <div className="flex items-center justify-between gap-3 mb-3">
         <div>
           <span className="text-sm font-semibold text-neutral-900">{group.exercise}</span>
@@ -2022,17 +1992,6 @@ function ExerciseGroupCard({
               {formatPreviousSetsSummary(prev, isTimeBased)}
             </p>
           )}
-          <select
-            value={group.supersetId || ""}
-            onChange={(e) => onSupersetChange(group.id, e.target.value)}
-            aria-label={`Superset grouping for ${group.exercise}`}
-            className="mt-1.5 text-xs border border-neutral-300 px-1.5 py-1 text-neutral-500"
-          >
-            <option value="">Not in a superset</option>
-            {supersetOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
         </div>
         <div className="flex items-center gap-3 shrink-0">
           <span className="flex items-center gap-1.5">
@@ -2067,16 +2026,6 @@ function ExerciseGroupCard({
             }`}
           >
             <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
-            <select
-              value={s.type}
-              onChange={(e) => updateSet(group.id, s.id, "type", e.target.value)}
-              aria-label={`Set type for set ${i + 1} of ${group.exercise}`}
-              className={`text-xs border px-1.5 py-2 sm:py-1.5 shrink-0 ${SET_TYPE_STYLES[s.type]}`}
-            >
-              {SET_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
-            </select>
             <input
               type="text"
               inputMode="decimal"
@@ -2159,72 +2108,29 @@ function ExerciseGroupCard({
   );
 }
 
-// Renders a workout's exercise groups as superset-aware blocks — a run of
-// linked exercises gets wrapped together with a "Superset A" label; a
-// standalone exercise renders as before. Shared by TrainingLog and
-// ClientWorkspace, since both need identical superset behaviour.
+// Renders a workout's exercise groups, one card each. Shared by TrainingLog
+// and ClientWorkspace so the two never drift apart.
 function WorkoutBuilderGroups({
   workoutEntries, history, openDate, unitLabel,
-  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete, setGroupSuperset,
+  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
 }) {
-  const blocks = groupWorkoutEntriesForDisplay(workoutEntries);
-  const existingSupersetIds = [...new Set(workoutEntries.map((g) => g.supersetId).filter(Boolean))];
-  const supersetLetters = {};
-  existingSupersetIds.forEach((id, i) => {
-    supersetLetters[id] = String.fromCharCode(65 + i);
-  });
-  function optionsFor(group) {
-    const opts = [];
-    // The group's own current superset (if any) needs its own <option> so
-    // the <select>'s value actually matches a real option — otherwise the
-    // browser silently falls back to the first option regardless of what
-    // React's value prop says.
-    if (group.supersetId) {
-      opts.push({ value: group.supersetId, label: `Superset ${supersetLetters[group.supersetId]}` });
-    } else {
-      opts.push({ value: "__new__", label: "Start a superset" });
-    }
-    existingSupersetIds
-      .filter((id) => id !== group.supersetId)
-      .forEach((id) => opts.push({ value: id, label: `Join Superset ${supersetLetters[id]}` }));
-    return opts;
-  }
-  function cardFor(group) {
-    return (
-      <ExerciseGroupCard
-        key={group.id}
-        group={group}
-        isTimeBased={isTimeBasedCategory(group.category)}
-        prev={findPreviousPerformance(group.exercise, history, openDate)}
-        unitLabel={unitLabel}
-        updateGroupField={updateGroupField}
-        removeExerciseGroup={removeExerciseGroup}
-        addSet={addSet}
-        updateSet={updateSet}
-        removeSet={removeSet}
-        toggleSetComplete={toggleSetComplete}
-        supersetOptions={optionsFor(group)}
-        onSupersetChange={setGroupSuperset}
-        bordered={false}
-      />
-    );
-  }
   return (
     <div className="space-y-6">
-      {blocks.map((block) =>
-        block.type === "single" ? (
-          <div key={block.group.id} className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
-            {cardFor(block.group)}
-          </div>
-        ) : (
-          <div key={block.supersetId} className="border border-neutral-300 bg-neutral-50 p-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500 mb-3">
-              Superset {supersetLetters[block.supersetId]}
-            </p>
-            <div className="space-y-4">{block.members.map(cardFor)}</div>
-          </div>
-        )
-      )}
+      {workoutEntries.map((group) => (
+        <ExerciseGroupCard
+          key={group.id}
+          group={group}
+          isTimeBased={isTimeBasedCategory(group.category)}
+          prev={findPreviousPerformance(group.exercise, history, openDate)}
+          unitLabel={unitLabel}
+          updateGroupField={updateGroupField}
+          removeExerciseGroup={removeExerciseGroup}
+          addSet={addSet}
+          updateSet={updateSet}
+          removeSet={removeSet}
+          toggleSetComplete={toggleSetComplete}
+        />
+      ))}
     </div>
   );
 }
@@ -2451,6 +2357,20 @@ function TrainingLog({ session, onLogout }) {
 
   const [search, setSearch] = useState("");
   const [viewingExercise, setViewingExercise] = useState(null);
+  // Scrolled into view once a category is picked from the "Start a workout"
+  // landing screen, so choosing a category visibly takes the client
+  // straight to the exercise library instead of just opening the builder
+  // somewhere off-screen above. A flag + effect (not requestAnimationFrame
+  // right after setBuilderOpen) because the library only exists in the DOM
+  // once React has actually committed the builderOpen=true render — an
+  // effect is guaranteed to run after that commit, a bare rAF isn't.
+  const libraryRef = useRef(null);
+  const [scrollToLibrary, setScrollToLibrary] = useState(false);
+  useEffect(() => {
+    if (!scrollToLibrary) return;
+    libraryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setScrollToLibrary(false);
+  }, [scrollToLibrary]);
 
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -2595,6 +2515,16 @@ function TrainingLog({ session, onLogout }) {
     }
   }
 
+  // Landing-screen action: picking a category both starts today's workout
+  // and takes the client straight to the exercise library for that
+  // category, instead of leaving them to separately hunt for a "start"
+  // button and then scroll to find exercises.
+  function startWorkoutWithCategory(cat) {
+    setActiveCategory(cat);
+    setBuilderOpen(true);
+    setScrollToLibrary(true);
+  }
+
   function addExerciseToWorkout(name) {
     const isTimeBased = isTimeBasedCategory(activeCategory);
     // Prefill the first set from last time this exercise was logged, so
@@ -2608,7 +2538,6 @@ function TrainingLog({ session, onLogout }) {
         exercise: name,
         category: activeCategory,
         restMinutes: isTimeBased ? "3" : "1",
-        supersetId: null,
         sets: [
           {
             id: crypto.randomUUID(),
@@ -2624,34 +2553,6 @@ function TrainingLog({ session, onLogout }) {
       },
     ]);
     setBuilderOpen(true);
-  }
-
-  // Links/unlinks a group into a superset. "" clears it; "__new__" starts a
-  // fresh superset with just this group (a transient state — it renders as
-  // a normal single exercise until a second one joins); any other value is
-  // an existing supersetId to join. Any superset left with under 2 members
-  // afterward auto-collapses back to standalone so a stray "Superset A"
-  // label never survives its last exercise leaving.
-  function setGroupSuperset(groupId, value) {
-    setWorkoutEntries((prev) => {
-      let next = prev.map((g) => {
-        if (g.id !== groupId) return g;
-        if (value === "") return { ...g, supersetId: null };
-        if (value === "__new__") return { ...g, supersetId: crypto.randomUUID() };
-        return { ...g, supersetId: value };
-      });
-      // Only collapse on an explicit unlink — a freshly started superset
-      // legitimately has just one member until a partner joins it, and
-      // must survive that moment rather than being purged immediately.
-      if (value === "") {
-        const counts = {};
-        next.forEach((g) => {
-          if (g.supersetId) counts[g.supersetId] = (counts[g.supersetId] || 0) + 1;
-        });
-        next = next.map((g) => (g.supersetId && counts[g.supersetId] < 2 ? { ...g, supersetId: null } : g));
-      }
-      return next;
-    });
   }
 
   // Adds a saved routine's exercises into the builder — additive, like
@@ -2734,12 +2635,7 @@ function TrainingLog({ session, onLogout }) {
             }
       )
     );
-    // In a superset, rest only fires after the last exercise in the round —
-    // completing set 1 of A1 shouldn't rest before A2 has even happened.
-    const isLastInSuperset =
-      !group.supersetId ||
-      workoutEntries.filter((g) => g.supersetId === group.supersetId).slice(-1)[0]?.id === groupId;
-    if (nowCompleted && isLastInSuperset) {
+    if (nowCompleted) {
       const restSeconds = Math.round((Number(group.restMinutes) || 0) * 60);
       if (restSeconds > 0) startRestTimer(restSeconds, group.exercise);
     }
@@ -2902,32 +2798,12 @@ function TrainingLog({ session, onLogout }) {
 
         <div className="mt-8 border-b border-neutral-300" />
 
-        <div role="tablist" className="mt-6 flex flex-wrap gap-3">
-          {CATEGORIES.map((cat) => {
-            const active = cat === activeCategory;
-            return (
-              <button
-                key={cat}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setActiveCategory(cat)}
-                className={`px-5 py-4 text-sm font-medium border transition-colors text-left min-w-[140px] flex-1 sm:flex-none ${
-                  active
-                    ? "bg-neutral-900 text-white border-neutral-900"
-                    : "bg-white text-neutral-700 border-neutral-200 hover:border-neutral-400"
-                }`}
-              >
-                {cat}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="mt-10 border-b border-neutral-300" />
-
-        <div className="mt-6 flex items-center justify-between gap-4">
-          <div>
+        {!builderOpen ? (
+          // Landing state: nothing started for today yet. Picking a
+          // category both starts the workout and jumps straight to the
+          // exercise library for it — no separate "Start Workout" button
+          // to find first.
+          <div className="mt-6">
             <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
               {new Date(`${openWorkoutDate}T00:00:00`).toLocaleDateString(undefined, {
                 weekday: "long",
@@ -2935,28 +2811,81 @@ function TrainingLog({ session, onLogout }) {
                 day: "numeric",
               })}
             </p>
-            <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900">
-              {openWorkoutDate === new Date().toISOString().slice(0, 10) ? "Today's workout." : "Amending this day."}
+            <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900 mb-5">
+              Start a workout.
             </h2>
-            {openWorkoutDate !== new Date().toISOString().slice(0, 10) && (
+            <div role="tablist" className="flex flex-wrap gap-3">
+              {CATEGORIES.map((cat) => (
+                <button
+                  key={cat}
+                  type="button"
+                  role="tab"
+                  onClick={() => startWorkoutWithCategory(cat)}
+                  className="px-5 py-4 text-sm font-medium border transition-colors text-left min-w-[140px] flex-1 sm:flex-none bg-white text-neutral-700 border-neutral-200 hover:border-neutral-400"
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
+            <div role="tablist" className="mt-6 flex flex-wrap gap-3">
+              {CATEGORIES.map((cat) => {
+                const active = cat === activeCategory;
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setActiveCategory(cat)}
+                    className={`px-5 py-4 text-sm font-medium border transition-colors text-left min-w-[140px] flex-1 sm:flex-none ${
+                      active
+                        ? "bg-neutral-900 text-white border-neutral-900"
+                        : "bg-white text-neutral-700 border-neutral-200 hover:border-neutral-400"
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-10 border-b border-neutral-300" />
+
+            <div className="mt-6 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
+                  {new Date(`${openWorkoutDate}T00:00:00`).toLocaleDateString(undefined, {
+                    weekday: "long",
+                    month: "long",
+                    day: "numeric",
+                  })}
+                </p>
+                <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900">
+                  {openWorkoutDate === new Date().toISOString().slice(0, 10) ? "Today's workout." : "Amending this day."}
+                </h2>
+                {openWorkoutDate !== new Date().toISOString().slice(0, 10) && (
+                  <button
+                    type="button"
+                    onClick={backToToday}
+                    className="mt-1 flex items-center gap-1 text-xs text-neutral-500 hover:text-neutral-900"
+                  >
+                    <ArrowLeft size={12} /> Back to today
+                  </button>
+                )}
+              </div>
               <button
                 type="button"
-                onClick={backToToday}
-                className="mt-1 flex items-center gap-1 text-xs text-neutral-500 hover:text-neutral-900"
+                onClick={() => setBuilderOpen(false)}
+                className="shrink-0 flex items-center gap-2 bg-neutral-900 text-white text-sm font-medium px-5 py-3 hover:bg-neutral-800 transition-colors"
               >
-                <ArrowLeft size={12} /> Back to today
+                Hide
               </button>
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={() => setBuilderOpen((v) => !v)}
-            className="shrink-0 flex items-center gap-2 bg-neutral-900 text-white text-sm font-medium px-5 py-3 hover:bg-neutral-800 transition-colors"
-          >
-            {builderOpen ? "Hide" : "Start Workout"}
-            <Play size={14} fill="currentColor" strokeWidth={0} />
-          </button>
-        </div>
+            </div>
+          </>
+        )}
 
         {restActive && (
           <div className="sticky top-2 z-10 mt-6 bg-neutral-900 text-white px-4 py-3 flex items-center justify-between gap-3">
@@ -3038,7 +2967,6 @@ function TrainingLog({ session, onLogout }) {
                 updateSet={updateSet}
                 removeSet={removeSet}
                 toggleSetComplete={toggleSetComplete}
-                setGroupSuperset={setGroupSuperset}
               />
             )}
 
@@ -3213,9 +3141,11 @@ function TrainingLog({ session, onLogout }) {
           measurementSystem={profile?.measurement_system || "metric"}
         />
 
-        <div className="mt-10 border-b border-neutral-300" />
+        {builderOpen && (
+          <>
+            <div className="mt-10 border-b border-neutral-300" />
 
-        <div className="mt-6 pb-16">
+            <div className="mt-6 pb-16" ref={libraryRef}>
           <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
             Exercise library
           </p>
@@ -3285,7 +3215,9 @@ function TrainingLog({ session, onLogout }) {
               }}
             />
           )}
-        </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -3540,7 +3472,6 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         exercise: name,
         category: activeCategory,
         restMinutes: isTimeBased ? "3" : "1",
-        supersetId: null,
         sets: [
           {
             id: crypto.randomUUID(),
@@ -3556,30 +3487,6 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       },
     ]);
     setBuilderOpen(true);
-  }
-
-  // Links/unlinks a group into a superset — see the identical helper in
-  // TrainingLog for the full explanation of "" / "__new__" / an id.
-  function setGroupSuperset(groupId, value) {
-    setWorkoutEntries((prev) => {
-      let next = prev.map((g) => {
-        if (g.id !== groupId) return g;
-        if (value === "") return { ...g, supersetId: null };
-        if (value === "__new__") return { ...g, supersetId: crypto.randomUUID() };
-        return { ...g, supersetId: value };
-      });
-      // Only collapse on an explicit unlink — a freshly started superset
-      // legitimately has just one member until a partner joins it, and
-      // must survive that moment rather than being purged immediately.
-      if (value === "") {
-        const counts = {};
-        next.forEach((g) => {
-          if (g.supersetId) counts[g.supersetId] = (counts[g.supersetId] || 0) + 1;
-        });
-        next = next.map((g) => (g.supersetId && counts[g.supersetId] < 2 ? { ...g, supersetId: null } : g));
-      }
-      return next;
-    });
   }
 
   // Adds a saved routine's exercises into the builder — additive, like
@@ -3907,7 +3814,6 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   updateSet={updateSet}
                   removeSet={removeSet}
                   toggleSetComplete={toggleSetComplete}
-                  setGroupSuperset={setGroupSuperset}
                 />
               )}
 
