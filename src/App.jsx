@@ -3012,6 +3012,84 @@ function TrainingLog({ session, onLogout }) {
           </div>
         )}
 
+        {builderOpen && (
+          <>
+            <div className="mt-10 border-b border-neutral-300" />
+
+            <div className="mt-6 pb-16" ref={libraryRef}>
+          <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
+            Exercise library
+          </p>
+          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900 mb-4">
+            Learn each movement.
+          </h2>
+
+          <div className="relative mb-3">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search Exercise Library"
+              aria-label="Search exercise library"
+              className="w-full border border-neutral-300 pl-9 pr-9 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700"
+              >
+                <X size={15} />
+              </button>
+            )}
+          </div>
+
+          <div className="border border-neutral-200 bg-white max-h-72 overflow-y-auto">
+            {filteredLibrary.length === 0 ? (
+              <p className="px-4 py-6 text-sm text-neutral-400 text-center">
+                No exercises match "{search}".
+              </p>
+            ) : (
+              filteredLibrary.map((ex) => (
+                <div
+                  key={ex}
+                  className="w-full flex items-center justify-between border-b border-neutral-100 last:border-0 hover:bg-neutral-50 transition-colors"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setViewingExercise(ex)}
+                    className="flex-1 text-left px-4 py-2.5 text-sm text-neutral-700"
+                  >
+                    {ex}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addExerciseToWorkout(ex)}
+                    aria-label={`Add ${ex} to workout`}
+                    className="px-3 py-2.5 text-neutral-300 hover:text-neutral-900"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          {viewingExercise && (
+            <ExerciseDetailModal
+              name={viewingExercise}
+              onClose={() => setViewingExercise(null)}
+              onAdd={() => {
+                addExerciseToWorkout(viewingExercise);
+                setViewingExercise(null);
+              }}
+            />
+          )}
+            </div>
+          </>
+        )}
+
         <div className="mt-10 border-b border-neutral-300" />
 
         <div className="mt-6">
@@ -3140,84 +3218,6 @@ function TrainingLog({ session, onLogout }) {
           deleteMeasurement={deleteMeasurement}
           measurementSystem={profile?.measurement_system || "metric"}
         />
-
-        {builderOpen && (
-          <>
-            <div className="mt-10 border-b border-neutral-300" />
-
-            <div className="mt-6 pb-16" ref={libraryRef}>
-          <p className="text-[10px] sm:text-[11px] tracking-[0.2em] font-semibold uppercase text-neutral-500 mb-1">
-            Exercise library
-          </p>
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-neutral-900 mb-4">
-            Learn each movement.
-          </h2>
-
-          <div className="relative mb-3">
-            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search Exercise Library"
-              aria-label="Search exercise library"
-              className="w-full border border-neutral-300 pl-9 pr-9 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-neutral-900"
-            />
-            {search && (
-              <button
-                type="button"
-                onClick={() => setSearch("")}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700"
-              >
-                <X size={15} />
-              </button>
-            )}
-          </div>
-
-          <div className="border border-neutral-200 bg-white max-h-72 overflow-y-auto">
-            {filteredLibrary.length === 0 ? (
-              <p className="px-4 py-6 text-sm text-neutral-400 text-center">
-                No exercises match "{search}".
-              </p>
-            ) : (
-              filteredLibrary.map((ex) => (
-                <div
-                  key={ex}
-                  className="w-full flex items-center justify-between border-b border-neutral-100 last:border-0 hover:bg-neutral-50 transition-colors"
-                >
-                  <button
-                    type="button"
-                    onClick={() => setViewingExercise(ex)}
-                    className="flex-1 text-left px-4 py-2.5 text-sm text-neutral-700"
-                  >
-                    {ex}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => addExerciseToWorkout(ex)}
-                    aria-label={`Add ${ex} to workout`}
-                    className="px-3 py-2.5 text-neutral-300 hover:text-neutral-900"
-                  >
-                    <Plus size={14} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-
-          {viewingExercise && (
-            <ExerciseDetailModal
-              name={viewingExercise}
-              onClose={() => setViewingExercise(null)}
-              onAdd={() => {
-                addExerciseToWorkout(viewingExercise);
-                setViewingExercise(null);
-              }}
-            />
-          )}
-            </div>
-          </>
-        )}
       </div>
     </div>
   );
