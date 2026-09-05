@@ -740,8 +740,13 @@ function isTimeBasedCategory(category) {
 
 // ------------------------------------------------------------
 // Per-set logging: each exercise in a workout holds an array of
-// individual sets (own weight/reps/RPE/completion), matching how people
+// individual sets (own weight/reps/completion), matching how people
 // actually train — set 3 might be lighter than set 1.
+//
+// Every set still carries an `rpe` field internally, same as `type` above —
+// there's no UI to enter it anymore, but old saved workouts that logged an
+// RPE keep it intact (shown in CSV export) rather than losing it silently
+// the next time that workout is edited and re-saved.
 //
 // Every set still carries a `type` field internally, always "normal" —
 // there's no UI to change it. Kept (rather than removed outright) so old
@@ -846,8 +851,7 @@ function formatPreviousSetsSummary(prev, isTimeBased, defaultWeightUnit) {
   return prev.sets
     .map((s) => {
       const amount = isTimeBased ? (s.time ? `${s.time}s` : "") : (s.reps || "0");
-      const main = s.weight ? `${s.weight}${s.weightUnit || defaultWeightUnit}×${amount}` : amount;
-      return s.rpe ? `${main} @${s.rpe}` : main;
+      return s.weight ? `${s.weight}${s.weightUnit || defaultWeightUnit}×${amount}` : amount;
     })
     .join(", ");
 }
@@ -2021,7 +2025,7 @@ function MeasurementsSection({ measurements, measurementsLoading, addMeasurement
 // JSX did.
 function ExerciseGroupCard({
   group, isTimeBased, prev, defaultWeightUnit,
-  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
+  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete, updateSetCount,
 }) {
   return (
     <div className="border-b border-neutral-100 pb-5 last:border-0 last:pb-0">
@@ -2037,6 +2041,18 @@ function ExerciseGroupCard({
           )}
         </div>
         <div className="flex items-center gap-3 shrink-0">
+          <span className="flex items-center gap-1">
+            <input
+              type="number"
+              inputMode="numeric"
+              min="1"
+              value={group.sets.length}
+              onChange={(e) => updateSetCount(group.id, e.target.value)}
+              aria-label={`Number of sets for ${group.exercise}`}
+              className="w-12 border border-neutral-300 px-2 py-1.5 text-sm"
+            />
+            <span className="text-xs text-neutral-400">sets</span>
+          </span>
           <span className="flex items-center gap-1">
             <input
               type="number"
@@ -2120,18 +2136,6 @@ function ExerciseGroupCard({
                 className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
               />
             )}
-            <input
-              type="number"
-              inputMode="decimal"
-              step="0.5"
-              min="6"
-              max="10"
-              value={s.rpe}
-              onChange={(e) => updateSet(group.id, s.id, "rpe", e.target.value)}
-              placeholder="RPE"
-              aria-label={`RPE for set ${i + 1} of ${group.exercise}`}
-              className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-            />
             <button
               type="button"
               onClick={() => toggleSetComplete(group.id, s.id)}
@@ -2176,7 +2180,7 @@ function ExerciseGroupCard({
 // and ClientWorkspace so the two never drift apart.
 function WorkoutBuilderGroups({
   workoutEntries, history, openDate, defaultWeightUnit,
-  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
+  updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete, updateSetCount,
 }) {
   return (
     <div className="space-y-6">
@@ -2193,6 +2197,7 @@ function WorkoutBuilderGroups({
           updateSet={updateSet}
           removeSet={removeSet}
           toggleSetComplete={toggleSetComplete}
+          updateSetCount={updateSetCount}
         />
       ))}
     </div>
@@ -2664,6 +2669,23 @@ function TrainingLog({ session, onLogout }) {
     );
   }
 
+  // Driven by the "Sets" count field in the exercise header — resizes the
+  // sets array to match. Growing it copy-forwards from the last set (same
+  // newSet(prevSet) used by "+ Add set", so a typed count of 3 behaves
+  // exactly like clicking Add set twice); shrinking it drops from the end.
+  function updateSetCount(groupId, rawCount) {
+    const target = Math.max(1, parseInt(rawCount, 10) || 1);
+    setWorkoutEntries((prev) =>
+      prev.map((g) => {
+        if (g.id !== groupId) return g;
+        const sets = [...g.sets];
+        while (sets.length < target) sets.push(newSet(sets[sets.length - 1]));
+        while (sets.length > target) sets.pop();
+        return { ...g, sets };
+      })
+    );
+  }
+
   function updateGroupField(groupId, field, value) {
     setWorkoutEntries((prev) => prev.map((g) => (g.id === groupId ? { ...g, [field]: value } : g)));
   }
@@ -2745,13 +2767,6 @@ function TrainingLog({ session, onLogout }) {
         if (s.weight.trim() !== "" && !(Number(s.weight) >= 0)) {
           setSaveError(`Enter a valid weight for ${group.exercise}, or leave it blank.`);
           return;
-        }
-        if (s.rpe.trim() !== "") {
-          const rpeNum = Number(s.rpe);
-          if (!(rpeNum >= 6 && rpeNum <= 10) || Math.round(rpeNum * 2) !== rpeNum * 2) {
-            setSaveError(`RPE must be between 6 and 10 in 0.5 steps for ${group.exercise}, or left blank.`);
-            return;
-          }
         }
       }
     }
@@ -3037,6 +3052,7 @@ function TrainingLog({ session, onLogout }) {
                 updateSet={updateSet}
                 removeSet={removeSet}
                 toggleSetComplete={toggleSetComplete}
+                updateSetCount={updateSetCount}
               />
             )}
 
@@ -3604,6 +3620,23 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
     );
   }
 
+  // Driven by the "Sets" count field in the exercise header — resizes the
+  // sets array to match. Growing it copy-forwards from the last set (same
+  // newSet(prevSet) used by "+ Add set", so a typed count of 3 behaves
+  // exactly like clicking Add set twice); shrinking it drops from the end.
+  function updateSetCount(groupId, rawCount) {
+    const target = Math.max(1, parseInt(rawCount, 10) || 1);
+    setWorkoutEntries((prev) =>
+      prev.map((g) => {
+        if (g.id !== groupId) return g;
+        const sets = [...g.sets];
+        while (sets.length < target) sets.push(newSet(sets[sets.length - 1]));
+        while (sets.length > target) sets.pop();
+        return { ...g, sets };
+      })
+    );
+  }
+
   function updateGroupField(groupId, field, value) {
     setWorkoutEntries((prev) => prev.map((g) => (g.id === groupId ? { ...g, [field]: value } : g)));
   }
@@ -3676,13 +3709,6 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         if (s.weight.trim() !== "" && !(Number(s.weight) >= 0)) {
           setSaveError(`Enter a valid weight for ${group.exercise}, or leave it blank.`);
           return;
-        }
-        if (s.rpe.trim() !== "") {
-          const rpeNum = Number(s.rpe);
-          if (!(rpeNum >= 6 && rpeNum <= 10) || Math.round(rpeNum * 2) !== rpeNum * 2) {
-            setSaveError(`RPE must be between 6 and 10 in 0.5 steps for ${group.exercise}, or left blank.`);
-            return;
-          }
         }
       }
     }
@@ -3890,6 +3916,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   updateSet={updateSet}
                   removeSet={removeSet}
                   toggleSetComplete={toggleSetComplete}
+                  updateSetCount={updateSetCount}
                 />
               )}
 
