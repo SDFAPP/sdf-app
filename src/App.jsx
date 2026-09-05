@@ -760,6 +760,7 @@ function newSet(prevSet) {
   return {
     id: crypto.randomUUID(),
     weight: prevSet?.weight ?? "",
+    weightUnit: prevSet?.weightUnit ?? null,
     reps: prevSet?.reps ?? "",
     time: prevSet?.time ?? "",
     rpe: "",
@@ -773,16 +774,25 @@ function newSet(prevSet) {
 // as {weight, reps, time, rest, sets: "3"} — a single prescription, not
 // individual sets. Expand that into N identical set rows so old data still
 // displays and edits correctly; new saves always use the array shape.
+//
+// weightUnit is left null (not defaulted here) for sets that predate the
+// kg/lbs picker — hydrateExerciseEntry has no access to the account's
+// measurement_system, so callers fall back to that themselves at the point
+// of use (display, or PR/volume math) rather than baking in a wrong guess.
+// restUnit defaults to "min" — restMinutes was always minutes before the
+// seconds/minutes picker existed, so that's unambiguous.
 function hydrateExerciseEntry(entry) {
   if (Array.isArray(entry.sets)) {
     return {
       id: crypto.randomUUID(),
       exercise: entry.exercise,
       category: entry.category,
-      restMinutes: String(entry.restMinutes ?? entry.rest ?? "1"),
+      restValue: String(entry.restValue ?? entry.restMinutes ?? entry.rest ?? "1"),
+      restUnit: entry.restUnit || "min",
       sets: entry.sets.map((s) => ({
         id: crypto.randomUUID(),
         weight: s.weight ?? "",
+        weightUnit: s.weightUnit || null,
         reps: s.reps ?? "",
         time: s.time ?? "",
         rpe: s.rpe ?? "",
@@ -797,10 +807,12 @@ function hydrateExerciseEntry(entry) {
     id: crypto.randomUUID(),
     exercise: entry.exercise,
     category: entry.category,
-    restMinutes: String(entry.rest ?? "1"),
+    restValue: String(entry.rest ?? "1"),
+    restUnit: "min",
     sets: Array.from({ length: count }, () => ({
       id: crypto.randomUUID(),
       weight: entry.weight ?? "",
+      weightUnit: null,
       reps: entry.reps ?? "",
       time: entry.time ?? "",
       rpe: "",
@@ -829,37 +841,50 @@ function findPreviousPerformance(exerciseName, historyList, excludeDate) {
 }
 
 // Compact "100x5 @7, 100x5" style summary of a previous-performance record.
-function formatPreviousSetsSummary(prev, isTimeBased) {
+function formatPreviousSetsSummary(prev, isTimeBased, defaultWeightUnit) {
   if (!prev) return "";
   return prev.sets
     .map((s) => {
       const amount = isTimeBased ? (s.time ? `${s.time}s` : "") : (s.reps || "0");
-      const main = s.weight ? `${s.weight}×${amount}` : amount;
+      const main = s.weight ? `${s.weight}${s.weightUnit || defaultWeightUnit}×${amount}` : amount;
       return s.rpe ? `${main} @${s.rpe}` : main;
     })
     .join(", ");
 }
 
+// Sets can each carry their own weightUnit (kg or lbs) now that there's a
+// per-set picker — older sets saved before that picker existed have none,
+// so `defaultWeightUnit` (the account's current preference) fills in for
+// those. Always returns a canonical kg value so PRs/volume stay
+// numerically correct even when a client mixes units across sessions.
+function setWeightKg(s, defaultWeightUnit) {
+  const raw = Number(s.weight);
+  const unit = s.weightUnit || defaultWeightUnit;
+  return unit === "lbs" ? raw * KG_PER_LB : raw;
+}
+
 // Personal records: for each exercise, the best set ever completed by
-// estimated 1-rep max (Epley formula: weight * (1 + reps/30)). Warm-up and
-// drop sets are excluded since they're not a genuine effort at that load;
-// bodyweight/time-based sets (no numeric weight) don't have a meaningful
-// 1RM so they're skipped too. `workoutsList` should be completed workouts
-// only — pass whatever range of history you want PRs computed over.
-function computePersonalRecords(workoutsList) {
+// estimated 1-rep max (Epley formula: weight * (1 + reps/30)), computed in
+// canonical kg. Warm-up and drop sets are excluded since they're not a
+// genuine effort at that load; bodyweight/time-based sets (no numeric
+// weight) don't have a meaningful 1RM so they're skipped too.
+// `workoutsList` should be completed workouts only — pass whatever range
+// of history you want PRs computed over. Returned weights are in kg;
+// convert with kgToDisplay for the account's measurement_system.
+function computePersonalRecords(workoutsList, defaultWeightUnit) {
   const best = {};
   for (const w of workoutsList || []) {
     const groups = (w.entries || []).map(hydrateExerciseEntry);
     for (const g of groups) {
       for (const s of g.sets) {
         if (s.type === "warmup" || s.type === "drop") continue;
-        const weight = Number(s.weight);
+        const weightKg = setWeightKg(s, defaultWeightUnit);
         const reps = Number(s.reps);
-        if (!(weight > 0) || !Number.isInteger(reps) || reps <= 0) continue;
-        const estOneRm = weight * (1 + reps / 30);
+        if (!(weightKg > 0) || !Number.isInteger(reps) || reps <= 0) continue;
+        const estOneRm = weightKg * (1 + reps / 30);
         const current = best[g.exercise];
         if (!current || estOneRm > current.estOneRm) {
-          best[g.exercise] = { estOneRm, weight, reps, date: w.workout_date, category: g.category };
+          best[g.exercise] = { estOneRm, weightKg, reps, date: w.workout_date, category: g.category };
         }
       }
     }
@@ -867,14 +892,16 @@ function computePersonalRecords(workoutsList) {
   return best;
 }
 
-// Per-exercise training volume (sum of weight x reps across counted sets)
-// for each day it was logged — the data behind the volume trend chart.
-// Warm-up sets are excluded (not real work); drop/failure sets DO count
-// here, unlike in computePersonalRecords, since total volume cares about
-// everything actually lifted, not just the single best effort. Exercises
-// with no numeric weight (bodyweight/time-based) never accumulate volume
-// and so never appear — there's nothing meaningful to chart for them.
-function computeVolumeHistory(workoutsList) {
+// Per-exercise training volume (sum of weight x reps across counted sets,
+// in canonical kg) for each day it was logged — the data behind the volume
+// trend chart. Warm-up sets are excluded (not real work); drop/failure
+// sets DO count here, unlike in computePersonalRecords, since total volume
+// cares about everything actually lifted, not just the single best
+// effort. Exercises with no numeric weight (bodyweight/time-based) never
+// accumulate volume and so never appear — there's nothing meaningful to
+// chart for them. Returned volumes are in kg-equivalent; convert with
+// kgToDisplay for the account's measurement_system.
+function computeVolumeHistory(workoutsList, defaultWeightUnit) {
   const byExercise = {};
   for (const w of workoutsList || []) {
     const groups = (w.entries || []).map(hydrateExerciseEntry);
@@ -882,9 +909,9 @@ function computeVolumeHistory(workoutsList) {
       let volume = 0;
       for (const s of g.sets) {
         if (s.type === "warmup") continue;
-        const weight = Number(s.weight);
+        const weightKg = setWeightKg(s, defaultWeightUnit);
         const reps = Number(s.reps);
-        if (weight > 0 && Number.isInteger(reps) && reps > 0) volume += weight * reps;
+        if (weightKg > 0 && Number.isInteger(reps) && reps > 0) volume += weightKg * reps;
       }
       if (volume <= 0) continue;
       (byExercise[g.exercise] ||= []).push({ date: w.workout_date, volume });
@@ -913,8 +940,8 @@ function csvEscape(value) {
   const str = String(value ?? "");
   return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
-function buildWorkoutsCsv(workouts) {
-  const header = ["Date", "Status", "Category", "Exercise", "Set", "Type", "Weight", "Reps", "Time (sec)", "RPE", "Completed"];
+function buildWorkoutsCsv(workouts, defaultWeightUnit) {
+  const header = ["Date", "Status", "Category", "Exercise", "Set", "Type", "Weight", "Weight Unit", "Reps", "Time (sec)", "RPE", "Completed"];
   const rows = [header];
   for (const w of workouts || []) {
     const groups = (w.entries || []).map(hydrateExerciseEntry);
@@ -928,6 +955,7 @@ function buildWorkoutsCsv(workouts) {
           i + 1,
           SET_TYPES.find((t) => t.value === s.type)?.label || s.type,
           s.weight,
+          s.weight ? s.weightUnit || defaultWeightUnit : "",
           s.reps,
           s.time,
           s.rpe,
@@ -948,6 +976,14 @@ function downloadCsv(filename, csv) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+// A group's rest is stored as a plain number (restValue) plus a unit
+// (restUnit: "sec" | "min") so it can be entered either way; this is the
+// one place that turns it into actual seconds for the timer.
+function restToSeconds(value, unit) {
+  const n = Number(value) || 0;
+  return unit === "sec" ? Math.round(n) : Math.round(n * 60);
 }
 
 function formatRestClock(totalSeconds) {
@@ -1247,7 +1283,7 @@ function useMeasurements(session, clientId) {
 // completed workout history. One fetch feeds both computePersonalRecords
 // and computeVolumeHistory, shared by TrainingLog (own history) and
 // ClientWorkspace (viewed client's history) via `clientId`.
-function useTrainingStats(session, clientId) {
+function useTrainingStats(session, clientId, defaultWeightUnit) {
   const [personalRecords, setPersonalRecords] = useState({});
   const [volumeHistory, setVolumeHistory] = useState({});
   const [statsLoading, setStatsLoading] = useState(false);
@@ -1267,8 +1303,8 @@ function useTrainingStats(session, clientId) {
       );
       if (!res.ok) return;
       const rows = await res.json();
-      setPersonalRecords(computePersonalRecords(rows));
-      setVolumeHistory(computeVolumeHistory(rows));
+      setPersonalRecords(computePersonalRecords(rows, defaultWeightUnit));
+      setVolumeHistory(computeVolumeHistory(rows, defaultWeightUnit));
     } catch {
       // Stats just won't show — not worth surfacing an error for a nice-to-have.
     } finally {
@@ -1760,7 +1796,14 @@ function VolumeSection({ volumeHistory, loading, unitLabel }) {
   }, [volumeHistory]);
 
   const points = (selected ? volumeHistory[selected] : null) || [];
-  const recentPoints = points.slice(-12);
+  // volumeHistory is stored in canonical kg (weight was normalized before
+  // multiplying by reps, since sets can each carry their own kg/lbs unit)
+  // — convert to the account's display unit here, same ratio as a plain
+  // weight conversion since volume is just weight scaled by a rep count.
+  const recentPoints = points.slice(-12).map((p) => ({
+    date: p.date,
+    volume: unitLabel === "lbs" ? p.volume / KG_PER_LB : p.volume,
+  }));
 
   return (
     <div className="mt-6">
@@ -1977,7 +2020,7 @@ function MeasurementsSection({ measurements, measurementsLoading, addMeasurement
 // ClientWorkspace so the two never drift apart the way the old duplicated
 // JSX did.
 function ExerciseGroupCard({
-  group, isTimeBased, prev, unitLabel,
+  group, isTimeBased, prev, defaultWeightUnit,
   updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
 }) {
   return (
@@ -1989,22 +2032,32 @@ function ExerciseGroupCard({
           {prev && (
             <p className="text-xs text-neutral-400 mt-0.5">
               Last ({new Date(`${prev.date}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}):{" "}
-              {formatPreviousSetsSummary(prev, isTimeBased)}
+              {formatPreviousSetsSummary(prev, isTimeBased, defaultWeightUnit)}
             </p>
           )}
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          <span className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1">
             <input
               type="number"
               inputMode="decimal"
               step="0.5"
-              value={group.restMinutes}
-              onChange={(e) => updateGroupField(group.id, "restMinutes", e.target.value)}
-              aria-label={`Rest in minutes for ${group.exercise}`}
+              min="0"
+              value={group.restValue}
+              onChange={(e) => updateGroupField(group.id, "restValue", e.target.value)}
+              aria-label={`Rest time for ${group.exercise}`}
               className="w-14 border border-neutral-300 px-2 py-1.5 text-sm"
             />
-            <span className="text-xs text-neutral-400">min rest</span>
+            <select
+              value={group.restUnit}
+              onChange={(e) => updateGroupField(group.id, "restUnit", e.target.value)}
+              aria-label={`Rest time unit for ${group.exercise}`}
+              className="border border-neutral-300 px-1 py-1.5 text-xs text-neutral-500"
+            >
+              <option value="sec">sec</option>
+              <option value="min">min</option>
+            </select>
+            <span className="text-xs text-neutral-400">rest</span>
           </span>
           <button
             type="button"
@@ -2026,15 +2079,26 @@ function ExerciseGroupCard({
             }`}
           >
             <span className="w-5 text-xs font-semibold text-neutral-400 text-center shrink-0">{i + 1}</span>
-            <input
-              type="text"
-              inputMode="decimal"
-              value={s.weight}
-              onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
-              placeholder={`Weight (${unitLabel})`}
-              aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
-              className="w-20 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
-            />
+            <span className="flex items-center gap-1 shrink-0">
+              <input
+                type="text"
+                inputMode="decimal"
+                value={s.weight}
+                onChange={(e) => updateSet(group.id, s.id, "weight", e.target.value)}
+                placeholder="Weight"
+                aria-label={`Weight for set ${i + 1} of ${group.exercise}`}
+                className="w-16 border border-neutral-300 px-2 py-2 sm:py-1.5 text-base sm:text-sm"
+              />
+              <select
+                value={s.weightUnit || defaultWeightUnit}
+                onChange={(e) => updateSet(group.id, s.id, "weightUnit", e.target.value)}
+                aria-label={`Weight unit for set ${i + 1} of ${group.exercise}`}
+                className="border border-neutral-300 px-1 py-2 sm:py-1.5 text-xs text-neutral-500"
+              >
+                <option value="kg">kg</option>
+                <option value="lbs">lbs</option>
+              </select>
+            </span>
             {isTimeBased ? (
               <input
                 type="number"
@@ -2111,7 +2175,7 @@ function ExerciseGroupCard({
 // Renders a workout's exercise groups, one card each. Shared by TrainingLog
 // and ClientWorkspace so the two never drift apart.
 function WorkoutBuilderGroups({
-  workoutEntries, history, openDate, unitLabel,
+  workoutEntries, history, openDate, defaultWeightUnit,
   updateGroupField, removeExerciseGroup, addSet, updateSet, removeSet, toggleSetComplete,
 }) {
   return (
@@ -2122,7 +2186,7 @@ function WorkoutBuilderGroups({
           group={group}
           isTimeBased={isTimeBasedCategory(group.category)}
           prev={findPreviousPerformance(group.exercise, history, openDate)}
-          unitLabel={unitLabel}
+          defaultWeightUnit={defaultWeightUnit}
           updateGroupField={updateGroupField}
           removeExerciseGroup={removeExerciseGroup}
           addSet={addSet}
@@ -2374,6 +2438,12 @@ function TrainingLog({ session, onLogout }) {
 
   const [profile, setProfile] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  // Declared this early (rather than down by the rest of the render-time
+  // derived values) because useTrainingStats needs it as a default unit
+  // for old sets that predate the per-set kg/lbs picker, and hooks must be
+  // called in the same order every render — this has to exist before that
+  // call, not after it.
+  const unitLabel = profile?.measurement_system === "imperial" ? "lbs" : "kg";
 
   const [routineNameDraft, setRoutineNameDraft] = useState("");
   const [savingRoutine, setSavingRoutine] = useState(false);
@@ -2387,7 +2457,7 @@ function TrainingLog({ session, onLogout }) {
   } = useRestTimer();
   const { routines, routinesLoading, saveAsRoutine, deleteRoutine } = useRoutines(session);
   const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, session.user.id);
-  const { personalRecords, volumeHistory, statsLoading, loadTrainingStats } = useTrainingStats(session, session.user.id);
+  const { personalRecords, volumeHistory, statsLoading, loadTrainingStats } = useTrainingStats(session, session.user.id, unitLabel);
 
   useEffect(() => {
     (async () => {
@@ -2424,7 +2494,7 @@ function TrainingLog({ session, onLogout }) {
         { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` } }
       );
       if (!res.ok) return;
-      downloadCsv(`workout-history-${new Date().toISOString().slice(0, 10)}.csv`, buildWorkoutsCsv(await res.json()));
+      downloadCsv(`workout-history-${new Date().toISOString().slice(0, 10)}.csv`, buildWorkoutsCsv(await res.json(), unitLabel));
     } catch {
       // Export just silently doesn't happen — the button stays clickable to retry.
     } finally {
@@ -2537,12 +2607,14 @@ function TrainingLog({ session, onLogout }) {
         id: crypto.randomUUID(),
         exercise: name,
         category: activeCategory,
-        restMinutes: isTimeBased ? "3" : "1",
+        restValue: isTimeBased ? "3" : "1",
+        restUnit: "min",
         sets: [
           {
             id: crypto.randomUUID(),
             weight: lastSet?.weight ?? "",
-            reps: lastSet?.reps || (isTimeBased ? "" : "5"),
+            weightUnit: lastSet?.weightUnit || unitLabel,
+            reps: lastSet?.reps ?? (isTimeBased ? "" : "0"),
             time: lastSet?.time || (isTimeBased ? "20" : ""),
             rpe: "",
             type: "normal",
@@ -2636,7 +2708,7 @@ function TrainingLog({ session, onLogout }) {
       )
     );
     if (nowCompleted) {
-      const restSeconds = Math.round((Number(group.restMinutes) || 0) * 60);
+      const restSeconds = restToSeconds(group.restValue, group.restUnit);
       if (restSeconds > 0) startRestTimer(restSeconds, group.exercise);
     }
   }
@@ -2651,7 +2723,7 @@ function TrainingLog({ session, onLogout }) {
         setSaveError(`Add at least one set for ${group.exercise}, or remove it.`);
         return;
       }
-      if (group.restMinutes.trim() !== "" && !(Number(group.restMinutes) >= 0)) {
+      if (group.restValue.trim() !== "" && !(Number(group.restValue) >= 0)) {
         setSaveError(`Enter a valid rest time for ${group.exercise}, or leave it blank.`);
         return;
       }
@@ -2746,8 +2818,6 @@ function TrainingLog({ session, onLogout }) {
       return inCategory && matchesSearch;
     });
   }, [search, activeCategory]);
-
-  const unitLabel = profile?.measurement_system === "imperial" ? "lbs" : "kg";
 
   return (
     <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
@@ -2960,7 +3030,7 @@ function TrainingLog({ session, onLogout }) {
                 workoutEntries={workoutEntries}
                 history={history}
                 openDate={openWorkoutDate}
-                unitLabel={unitLabel}
+                defaultWeightUnit={unitLabel}
                 updateGroupField={updateGroupField}
                 removeExerciseGroup={removeExerciseGroup}
                 addSet={addSet}
@@ -3195,7 +3265,8 @@ function TrainingLog({ session, onLogout }) {
                     <span className="text-sm text-neutral-800">
                       {exercise}
                       <span className="block text-xs text-neutral-400">
-                        {r.weight}{unitLabel} × {r.reps} · est. 1RM {Math.round(r.estOneRm * 10) / 10}{unitLabel}
+                        {kgToDisplay(r.weightKg, unitLabel === "lbs" ? "imperial" : "metric")}{unitLabel} × {r.reps} · est. 1RM{" "}
+                        {kgToDisplay(r.estOneRm, unitLabel === "lbs" ? "imperial" : "metric")}{unitLabel}
                       </span>
                     </span>
                     <span className="text-xs text-neutral-400 shrink-0">
@@ -3374,6 +3445,11 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   const [saveError, setSaveError] = useState("");
 
   const [search, setSearch] = useState("");
+  // Declared this early because useTrainingStats needs it as a default
+  // unit for old sets that predate the per-set kg/lbs picker, and hooks
+  // must be called in the same order every render — this has to exist
+  // before that call, not after it.
+  const unitLabel = client.measurement_system === "imperial" ? "lbs" : "kg";
 
   const [routineNameDraft, setRoutineNameDraft] = useState("");
   const [savingRoutine, setSavingRoutine] = useState(false);
@@ -3384,7 +3460,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
   // Measurements and training stats, unlike routines, belong to the client
   // being viewed — the coach is reviewing/logging that client's own data.
   const { measurements, measurementsLoading, addMeasurement, deleteMeasurement } = useMeasurements(session, client.id);
-  const { personalRecords, volumeHistory, statsLoading, loadTrainingStats } = useTrainingStats(session, client.id);
+  const { personalRecords, volumeHistory, statsLoading, loadTrainingStats } = useTrainingStats(session, client.id, unitLabel);
 
   const [exportingCsv, setExportingCsv] = useState(false);
 
@@ -3409,7 +3485,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       );
       if (!res.ok) return;
       const slug = (client.full_name || client.email || "client").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      downloadCsv(`${slug}-workout-history-${new Date().toISOString().slice(0, 10)}.csv`, buildWorkoutsCsv(await res.json()));
+      downloadCsv(`${slug}-workout-history-${new Date().toISOString().slice(0, 10)}.csv`, buildWorkoutsCsv(await res.json(), unitLabel));
     } catch {
       // Export just silently doesn't happen — the button stays clickable to retry.
     } finally {
@@ -3471,12 +3547,14 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         id: crypto.randomUUID(),
         exercise: name,
         category: activeCategory,
-        restMinutes: isTimeBased ? "3" : "1",
+        restValue: isTimeBased ? "3" : "1",
+        restUnit: "min",
         sets: [
           {
             id: crypto.randomUUID(),
             weight: lastSet?.weight ?? "",
-            reps: lastSet?.reps || (isTimeBased ? "" : "5"),
+            weightUnit: lastSet?.weightUnit || unitLabel,
+            reps: lastSet?.reps ?? (isTimeBased ? "" : "0"),
             time: lastSet?.time || (isTimeBased ? "20" : ""),
             rpe: "",
             type: "normal",
@@ -3576,7 +3654,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
         setSaveError(`Add at least one set for ${group.exercise}, or remove it.`);
         return;
       }
-      if (group.restMinutes.trim() !== "" && !(Number(group.restMinutes) >= 0)) {
+      if (group.restValue.trim() !== "" && !(Number(group.restValue) >= 0)) {
         setSaveError(`Enter a valid rest time for ${group.exercise}, or leave it blank.`);
         return;
       }
@@ -3669,8 +3747,6 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
       return inCategory && matchesSearch;
     });
   }, [search, activeCategory]);
-
-  const unitLabel = client.measurement_system === "imperial" ? "lbs" : "kg";
 
   return (
     <div className="min-h-screen bg-[#F5F4F1] px-5 sm:px-10 py-8 sm:py-12">
@@ -3807,7 +3883,7 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                   workoutEntries={workoutEntries}
                   history={history}
                   openDate={targetDate}
-                  unitLabel={unitLabel}
+                  defaultWeightUnit={unitLabel}
                   updateGroupField={updateGroupField}
                   removeExerciseGroup={removeExerciseGroup}
                   addSet={addSet}
@@ -3982,7 +4058,8 @@ function ClientWorkspace({ client, session, onBack, onLogout }) {
                       <span className="text-sm text-neutral-800">
                         {exercise}
                         <span className="block text-xs text-neutral-400">
-                          {r.weight}{unitLabel} × {r.reps} · est. 1RM {Math.round(r.estOneRm * 10) / 10}{unitLabel}
+                          {kgToDisplay(r.weightKg, unitLabel === "lbs" ? "imperial" : "metric")}{unitLabel} × {r.reps} · est. 1RM{" "}
+                          {kgToDisplay(r.estOneRm, unitLabel === "lbs" ? "imperial" : "metric")}{unitLabel}
                         </span>
                       </span>
                       <span className="text-xs text-neutral-400 shrink-0">
